@@ -6,6 +6,16 @@ Silicon — no CUDA anywhere. The backbone and audio-decoder tower run in MLX
 (Metal), the DAC codec in PyTorch (MPS). Voice cloning from a short reference
 clip, a CLI, and a local HTTP server included.
 
+> **⚠️ WORK IN PROGRESS — status: not yet producing intelligible speech.**
+> The pipeline runs end-to-end (model loads, generates speech-shaped audio with
+> clean EOS at the RTFs below), but as of 2026-10-14 the words are wrong:
+> synthesized clips transcribe as gibberish via Whisper (e.g. asked for
+> "the quick brown fox jumps over the lazy dog", heard "It's new as the old
+> bands are YAWA!"). Root cause under active investigation — the leading
+> suspect is the decode-loop frame/position ordering vs the reference
+> implementation. Acceptance bar: a clip must transcribe back to its prompt.
+> Follow the full story in [docs/JOURNEY.md](docs/JOURNEY.md).
+
 **Performance** on an M3 Ultra (512 GB unified memory): ~36 audio frames/s
 during decode, steady-state **RTF ≈ 0.59** — faster than real time. The
 quantized (4-bit experts) checkpoint needs ~24 GB of RAM; the bf16 checkpoint

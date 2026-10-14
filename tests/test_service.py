@@ -20,6 +20,7 @@ from drama3_mac.service import (
     LineCache,
     RenderError,
     TtsService,
+    _clear_mlx_cache,
     aggregate_finish_reason,
     sanitize_request,
 )
@@ -78,7 +79,7 @@ def test_f0_median_across_harmonics_is_fundamental():
 
 def _wav_bytes(audio: np.ndarray, sr: int = SR) -> bytes:
     buf = io.BytesIO()
-    sf.write(buf, audio, sr, subtype="PCM_16")
+    sf.write(buf, audio, sr, subtype="PCM_16", format="WAV")
     return buf.getvalue()
 
 
@@ -204,7 +205,7 @@ def test_envelope_fields_complete(registry_with_voice):
     wav, sr = sf.read(io.BytesIO(audio))
     assert len(wav) / sr == pytest.approx(env["duration_s"], abs=0.02)
     assert 0 < env["rms"] < 1
-    assert env["f0_hz_median"] == pytest.approx(150, abs=6)
+    assert env["f0_hz_median"] == pytest.approx(157, abs=4)  # fake tone: 150 + seed%50
     assert env["finish_reason"] == "eos"
     assert env["seed"] == 7
     assert env["rtf"] > 0
@@ -222,12 +223,14 @@ def test_same_seed_bit_identical(registry_with_voice):
     # second is served from cache and is bit-identical
     assert b["cache"] == "hit"
     assert a["audio_b64"] == b["audio_b64"]
-    # bypass the cache with a fresh service: engine receives identical seed
+    # bypass the cache: two separate services sharing the engine each render once
     engine = FakeEngine()
-    svc2 = _service(engine, registry_with_voice)
-    svc2.render({"text": "Line one.", "seed": 42})
-    svc2.render({"text": "Line one.", "seed": 42})
+    svc_a = _service(engine, registry_with_voice)
+    svc_b = _service(engine, registry_with_voice)
+    a = svc_a.render({"text": "Line one.", "seed": 42})
+    b = svc_b.render({"text": "Line one.", "seed": 42})
     assert engine.calls[0]["seed"] == engine.calls[1]["seed"] == 42
+    assert a["audio_b64"] == b["audio_b64"]  # same seed -> bit-identical take
 
 
 def test_cache_miss_on_different_text_and_stats():
@@ -350,7 +353,7 @@ def test_batch_renders_lines_and_captures_errors(registry_with_voice):
     assert payload["results"][2]["ok"] is True
     assert payload["ok"] is False
     # one clear-cache per line (MakeAPod's law), through the runner
-    assert sum(1 for fn in ran if "clear_cache" in getattr(fn, "__qualname__", "")) == 3
+    assert sum(1 for fn in ran if fn is _clear_mlx_cache) == 3
 
 
 def test_batch_duplicate_line_hits_cache():

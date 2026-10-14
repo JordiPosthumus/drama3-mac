@@ -72,6 +72,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         codec_dtype=args.codec_dtype,
         host=args.host,
         port=args.port,
+        voices_dir=args.voices_dir,
     )
     return 0
 
@@ -110,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     srv = sub.add_parser("serve", help="run the local TTS HTTP server")
     srv.add_argument("--host", default="127.0.0.1")
     srv.add_argument("--port", type=int, default=8843)
+    srv.add_argument("--voices-dir", default="voices",
+                     help="where named voices persist (git-ignored)")
     _add_common(srv)
     srv.set_defaults(func=cmd_serve)
 

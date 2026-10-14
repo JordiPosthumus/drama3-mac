@@ -54,7 +54,7 @@ class RenderError(RuntimeError):
 def encode_wav(audio: np.ndarray, sample_rate: int) -> bytes:
     """float32 mono -> 16-bit PCM wav bytes."""
     buffer = io.BytesIO()
-    sf.write(buffer, np.clip(audio, -1.0, 1.0), sample_rate, subtype="PCM_16")
+    sf.write(buffer, np.clip(audio, -1.0, 1.0), sample_rate, subtype="PCM_16", format="WAV")
     return buffer.getvalue()
 
 
@@ -382,6 +382,7 @@ class TtsService:
             try:
                 envelope = self.render(line)
                 envelope["ok"] = True
+                envelope["line_id"] = line.get("line_id", i)
             except (VoiceError, PreflightError, RenderError) as exc:
                 envelope = {
                     "ok": False,

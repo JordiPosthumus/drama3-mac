@@ -39,28 +39,38 @@ MAX_BODY_BYTES = 512 * 1024 * 1024  # 30 s multi-take references are big
 
 
 class MainThreadRunner:
-    """Runs callables on the thread that created the model."""
+    """Runs callables on the thread that created the model.
+
+    HTTP threads submit through :meth:`call` and wait.  Calls made FROM the
+    owner thread (e.g. a render job that itself needs to encode a reference)
+    execute inline — a nested ``call`` would otherwise deadlock waiting for
+    a loop that is blocked on the outer job.
+    """
 
     def __init__(self):
         self.jobs: queue.Queue = queue.Queue()
+        self._owner_ident = threading.get_ident()
 
     def loop(self) -> None:
         while True:
-            fn, args, box = self.jobs.get()
+            fn, args, kwargs, box = self.jobs.get()
             if fn is None:
                 break
             try:
-                box["result"] = fn(*args)
+                box["result"] = fn(*args, **kwargs)
             except BaseException as exc:  # surface everything to the caller
                 box["error"] = exc
             box["done"].set()
 
-    def call(self, fn, *args):
+    def call(self, fn, *args, **kwargs):
+        if threading.get_ident() == self._owner_ident:
+            return fn(*args, **kwargs)
         box = {"done": threading.Event()}
-        self.jobs.put((fn, args, box))
+        self.jobs.put((fn, args, kwargs, box))
         box["done"].wait()
         if "error" in box:
             raise box["error"]
+        return box["result"]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -166,10 +176,18 @@ class _Handler(BaseHTTPRequestHandler):
         name = request.get("name")
         audio_b64 = request.get("audio_b64")
         text = request.get("text")
-        if not name or not isinstance(audio_b64, str) or not text:
+        if (
+            not name
+            or not text
+            or not (
+                isinstance(audio_b64, str)
+                or (isinstance(audio_b64, list) and audio_b64)
+            )
+        ):
             self._send_json(
                 400,
-                {"error": "voice creation needs 'name', 'audio_b64' and 'text'"},
+                {"error": "voice creation needs 'name', 'audio_b64' (string or "
+                          "list for multi-take) and 'text'"},
             )
             return
         clips = audio_b64 if isinstance(audio_b64, list) else [audio_b64]
@@ -285,12 +303,11 @@ def serve(
     )
 
     # Warm up MLX's compiled decode graphs before serving: the first call pays
-    # ~10-60 s of compile. Runs inline on this thread, which IS the thread that
-    # loaded the model — exactly where runner.loop() will execute all jobs.
+    # ~10-60 s of compile. Runs INLINE on this thread — it IS the thread that
+    # loaded the model, and runner.loop() (below) will execute all jobs here.
+    # Do NOT route this through runner.call: the loop is not consuming yet.
     print("[server] warming up decode graphs ...", flush=True)
-    runner.call(
-        functools.partial(engine.tts, "Warmup.", single_chunk=True, max_new_tokens=12)
-    )
+    engine.tts("Warmup.", single_chunk=True, max_new_tokens=12)
     print("[server] warmup done", flush=True)
 
     handler = type("BoundHandler", (_Handler,), {"service": service, "runner": runner})

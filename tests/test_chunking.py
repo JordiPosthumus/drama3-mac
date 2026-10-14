@@ -116,3 +116,30 @@ def test_history_candidates_order():
     default.push("b", codes)
     default.push("c", codes)
     assert [t for t, _ in list(default.candidates())[0]] == ["a", "c"]
+
+
+def test_speaker_regroup_chunks_are_strings_and_validate_clean():
+    """Regression: speaker regrouping must yield strings, and validate_chunks
+    must accept the engine's chunk list (blocker 2026-10-15: a list-wrapped
+    chunk list from the engine crashed validate_text with .strip)."""
+    from drama3_mac.chunking import validate_chunks
+
+    text = (
+        "<|speaker:0|> The keeper rose before dawn, as he had for thirty years.\n"
+        "<|speaker:1|> The sea had not yet decided between grey and gold.\n"
+        "<|speaker:0|> He logged the wind and watched the boats slip out."
+    )
+    for shape in (text, text * 4):  # single-chunk and multi-chunk shapes
+        chunks = split_drama3_text(shape)
+        assert chunks and all(isinstance(c, str) for c in chunks)
+        validate_chunks(chunks)  # must not raise
+
+
+def test_validate_chunks_normalizes_group_shaped_chunks():
+    """Defence in depth: a producer handing back a list of segments per chunk
+    is joined in place instead of crashing on .strip."""
+    from drama3_mac.chunking import validate_chunks
+
+    chunks = ["<|speaker:0|> plain text here", ["<|speaker:1|> part one", "more"]]
+    validate_chunks(chunks)
+    assert chunks[1] == "<|speaker:1|> part one\nmore"

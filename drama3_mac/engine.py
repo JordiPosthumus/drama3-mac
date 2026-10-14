@@ -197,11 +197,14 @@ class Drama3Engine:
         prompt_texts = texts
         prompt_tokens = refs
 
-        chunks = [
-            text
+        # NB: a conditional EXPRESSION, not a list literal — the old
+        # `[text if single_chunk else split(...) or [text]]` wrapped the whole
+        # chunk list as one element and crashed validate_text on lists.
+        chunks = (
+            [text]
             if single_chunk
-            else split_drama3_text(text, max_bytes=chunk_bytes or CHUNK_BYTES) or [text]
-        ]
+            else (split_drama3_text(text, max_bytes=chunk_bytes or CHUNK_BYTES) or [text])
+        )
         validate_chunks(chunks)  # fail before generating anything
         if max_new_tokens <= 0:
             max_new_tokens = (

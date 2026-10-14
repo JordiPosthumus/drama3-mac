@@ -239,8 +239,17 @@ def chunk_prompt(
 
 
 def validate_chunks(chunks: list[str]) -> None:
-    """Reject bad text in any chunk before generating anything."""
+    """Reject bad text in any chunk before generating anything.
+
+    Defensive against group-shaped chunks: any producer that hands back a
+    list of segments for one chunk (older speaker-regrouping versions did)
+    is joined with newlines so validation and the prompt builder always see
+    strings.
+    """
     for index, chunk in enumerate(chunks):
+        if isinstance(chunk, (list, tuple)):
+            chunk = "\n".join(str(part) for part in chunk)
+            chunks[index] = chunk
         validate_text(chunk, f"chunk {index}")
 
 

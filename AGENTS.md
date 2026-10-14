@@ -77,7 +77,7 @@ result.chunks             # number of generated chunks (long text)
 
 ## Verify before claiming success
 
-1. `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q` → 19 passed.
+1. `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q` → 23 passed.
 2. The output wav exists, is > 1 s, and `mlx_whisper.transcribe(...,
    path_or_hf_repo='mlx-community/whisper-medium.en-mlx')` returns text
    matching the prompt (this is the project's acceptance bar; spectral

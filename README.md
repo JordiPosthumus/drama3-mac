@@ -85,7 +85,7 @@ RAM measured as peak process RSS during a real generation
 ### 4. Sanity check
 
 ```bash
-PYTHONPATH=. python -m pytest tests/ -q          # 19 tests, ~3 s
+PYTHONPATH=. python -m pytest tests/ -q          # 23 tests, ~3 s
 PYTHONPATH=. python -m drama3_mac.cli synthesize "The quick brown fox jumps over the lazy dog." -o outputs/first.wav
 ```
 
@@ -208,7 +208,7 @@ dispatch overhead. Benchmarks: `scripts/bench_decode.py <checkpoint>`.
 Numerics were validated layer-by-layer against the fish-speech PyTorch
 reference (`tests/`): norms, RoPE, full attention, GatedDeltaNet prefill and
 recurrent decode, MoE routing, tower prefill/decode, and the chunk splitter
-(byte-identical) — 19 tests, all green.
+(byte-identical) — 23 tests, all green.
 
 ## Repository layout
 

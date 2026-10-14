@@ -44,7 +44,7 @@ safetensors, numpy.
 huggingface-cli download fishaudio/drama-3 --local-dir model
 
 # 2. convert to an MLX checkpoint (4-bit experts by default; projections stay bf16)
-python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-eq4 --bits 4
+python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-q4 --bits 4
 #    experts-q8: --bits 8 (~42 GB)   bf16: --bits 16 (~72 GB)
 #    NOTE: do not pass --quantize-projections; quantizing the attention/GDN
 #    projections compounds noise until the model speaks gibberish (see docs/JOURNEY.md)

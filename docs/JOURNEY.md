@@ -128,9 +128,9 @@ is scrambled — fluent speech-shaped audio saying the wrong words.
 **Fix: experts-only quantization** (mirrors the FP8 release). Converter
 default changed; `--quantize-projections` exists for the adventurous.
 
-- `checkpoints/drama3-eq8` (experts q8, 41.6 GB): greedy round-trip
+- `checkpoints/drama3-q8` (experts q8, 41.6 GB): greedy round-trip
   **"The quick brown fox jumps over the lazy dog."** — perfect.
-- `checkpoints/drama3-eq4` (experts q4, 25.5 GB): greedy round-trip
+- `checkpoints/drama3-q4` (experts q4, 25.5 GB): greedy round-trip
   **"The quick brown fox jumps over the lazy dog."** — perfect.
 
 ## Status

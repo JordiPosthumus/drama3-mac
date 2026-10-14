@@ -219,6 +219,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Generation-Seconds", f"{result.generation.elapsed:.3f}")
         self.send_header("X-Frames", str(len(result.generation.frames)))
         self.send_header("X-Real-Time-Factor", f"{result.real_time_factor:.3f}")
+        if result.warnings:
+            # postflight findings ride along as a header; WARNs never fail
+            # the request, they report
+            self.send_header("X-Warnings", " | ".join(result.warnings)[:8000])
         self.end_headers()
         self.wfile.write(body)
 

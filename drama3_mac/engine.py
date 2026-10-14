@@ -21,6 +21,14 @@ from .codec import decode_frames, encode_audio, load_codec
 from .config import ModelConfig
 from .generate import DEFAULT_MAX_NEW_TOKENS, GenerationOutput, generate
 from .model import Drama3Model, load_model
+from .guardrails import (
+    Finding,
+    PreflightError,
+    check_capacity,
+    check_reference,
+    check_tag_balance,
+    run_postflight,
+)
 from .prompt import MAX_PROMPT_ROWS, build_prompt
 
 DEFAULT_TEMPERATURE = 0.8
@@ -36,6 +44,7 @@ class TTSResult:
     transcript: str
     chunks: int = 1  # number of generated chunks (long-text path)
     chunk_main: tuple[np.ndarray, ...] = ()  # main-token ids per chunk (analysis)
+    warnings: tuple[str, ...] = ()  # postflight findings, "[WARN] check: ..."
 
     @property
     def real_time_factor(self) -> float:
@@ -61,6 +70,16 @@ class Drama3Engine:
             if not codec_path.exists():
                 codec_path = Path(model_dir) / "codec.pth"
         import torch
+
+        from .guardrails import check_checkpoint
+
+        codec_failures = [
+            f for f in check_checkpoint(model_dir, codec_path) if f.level == "FAIL"
+        ]
+        if codec_failures:
+            raise PreflightError(
+                "; ".join(str(f) for f in codec_failures)
+            )
 
         if codec_device == "auto":
             codec_device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -93,6 +112,7 @@ class Drama3Engine:
         single_chunk: bool = False,
         chunk_gap: float = 0.05,
         repetition_penalty: float = 1.0,
+        sampling_plan: list[tuple[float, float]] | None = None,
     ) -> TTSResult:
         """Synthesize ``text``; clone the voice of ``reference_audio`` when given.
 
@@ -117,13 +137,32 @@ class Drama3Engine:
         for Drama 3, relying on repetition-aware sampling instead.  The port
         implements it as a CTRL-style penalty over the last 64 main tokens
         (semantic codes) for fighting hot-sampling loops; 1.0 = off = faithful.
+
+        ``sampling_plan`` optionally gives per-chunk ``(temperature, top_p)``
+        pairs — the measured hybrid recipe cools narration (0.7, 0.85) and
+        heats emotional peaks (0.8, 0.9); see README.  Its length must match
+        the number of chunks.
+
+        Preflight guardrails refuse bad jobs before generation (missing
+        checkpoint files, unbalanced delivery tags, prompt-capacity overflow,
+        broken reference clips — see guardrails.py); postflight findings are
+        returned on ``TTSResult.warnings``.
         """
-        refs: list[np.ndarray]
+        refs: list[np.ndarray] = []
+        waveforms: list[tuple[np.ndarray, int]] = []  # for reference checks
         if reference_codes is None and reference_audio is not None:
             audio_list = (
                 reference_audio if isinstance(reference_audio, list) else [reference_audio]
             )
-            refs = [self.encode_reference(a) for a in audio_list]
+            for a in audio_list:
+                if isinstance(a, np.ndarray):
+                    waveforms.append((a, 44100))
+                    refs.append(self.encode_reference(a))
+                else:
+                    wav, sr = sf.read(str(a), dtype="float32", always_2d=True)
+                    mono = wav.mean(axis=1)
+                    waveforms.append((mono, sr))
+                    refs.append(self.encode_reference(mono, sr))
         elif reference_codes is not None:
             refs = (
                 reference_codes if isinstance(reference_codes, list) else [reference_codes]
@@ -149,8 +188,42 @@ class Drama3Engine:
                 DEFAULT_MAX_NEW_TOKENS if len(chunks) == 1 else CHUNK_MAX_NEW_TOKENS
             )
 
+        # ---- preflight guardrails: refuse dud jobs before any GPU work ----
+        findings: list[Finding] = []
+        for failure in check_tag_balance(text):
+            if failure.level == "FAIL":
+                raise PreflightError(str(failure))
+            findings.append(failure)
+        for wav, sr in waveforms:
+            findings += check_reference(wav, sr)
+        ref_frames = sum(codes.shape[-1] for codes in refs)
+        if len(chunks) == 1:
+            findings += check_capacity(
+                text, ref_frames, utf8_len=utf8_len,
+                max_new_tokens=max_new_tokens,
+            )
+        else:
+            largest = max(chunks, key=utf8_len)
+            findings += check_capacity(
+                largest, ref_frames, utf8_len=utf8_len,
+                max_new_tokens=min(max_new_tokens, CHUNK_MAX_NEW_TOKENS),
+                history_rows=2 * CHUNK_MAX_NEW_TOKENS,
+            )
+        if sampling_plan is not None:
+            plan = [tuple(p) for p in sampling_plan]
+            if len(plan) != len(chunks):
+                raise PreflightError(
+                    f"[FAIL] sampling-plan: {len(plan)} (temperature, top_p) "
+                    f"pairs for {len(chunks)} chunk(s); lengths must match"
+                )
+        else:
+            plan = None
+
         started = time.perf_counter()
         if len(chunks) == 1:
+            gen_temperature, gen_top_p = (
+                plan[0] if plan is not None else (temperature, top_p)
+            )
             prompt = build_prompt(
                 self.model.tokenizer,
                 self.config,
@@ -159,18 +232,22 @@ class Drama3Engine:
                 prompt_tokens=prompt_tokens,
             )
             out = self._generate_chunk(
-                prompt, max_new_tokens, temperature, top_k, top_p,
+                prompt, max_new_tokens, gen_temperature, top_k, gen_top_p,
                 repetition_penalty=repetition_penalty,
             )
             if len(out.frames) == 0:
                 raise RuntimeError("the model emitted EOS before any audio frame")
             audio = decode_frames(self.codec, out.codes, device=self.codec_device)
+            findings += run_postflight(
+                [out.finish_reason], [len(out.frames)], [out.frames[:, 0]]
+            )
             return TTSResult(
                 audio=audio,
                 sample_rate=self.codec.sample_rate,
                 generation=out,
                 transcript=text,
                 chunk_main=(out.frames[:, 0],),
+                warnings=tuple(str(f) for f in findings),
             )
 
         # Long-text path: one fixed cache capacity for every chunk so the
@@ -194,6 +271,8 @@ class Drama3Engine:
         history = Drama3History()
         audios: list[np.ndarray] = []
         mains: list[np.ndarray] = []
+        finish_reasons: list[str] = []
+        frames_per_chunk: list[int] = []
         frames_total = 0
         elapsed = 0.0
         all_eos = True
@@ -211,8 +290,11 @@ class Drama3Engine:
                 raise ValueError(
                     f"chunk {index}: prompt has {len(prompt)} rows; no room to generate"
                 )
+            chunk_temperature, chunk_top_p = (
+                plan[index] if plan is not None else (temperature, top_p)
+            )
             out = self._generate_chunk(
-                prompt, budget, temperature, top_k, top_p,
+                prompt, budget, chunk_temperature, top_k, chunk_top_p,
                 cache_capacity=capacity,
                 repetition_penalty=repetition_penalty,
             )
@@ -222,11 +304,14 @@ class Drama3Engine:
                 continue
             all_eos &= out.finish_reason == "eos"
             frames_total += len(out.frames)
+            finish_reasons.append(out.finish_reason)
+            frames_per_chunk.append(len(out.frames))
             audios.append(decode_frames(self.codec, out.codes, device=self.codec_device))
             mains.append(out.frames[:, 0])
             history.push(chunk, out.codes)
         if not audios:
             raise RuntimeError("the model emitted EOS before any audio frame")
+        findings += run_postflight(finish_reasons, frames_per_chunk, mains)
         fade = min(128, self.codec.sample_rate // 200)  # ~5 ms edge fades kill
         for piece in audios:                            # codec seam transients
             ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
@@ -251,6 +336,7 @@ class Drama3Engine:
             transcript=text,
             chunks=len(audios),
             chunk_main=tuple(mains),
+            warnings=tuple(str(f) for f in findings),
         )
 
     def _generate_chunk(

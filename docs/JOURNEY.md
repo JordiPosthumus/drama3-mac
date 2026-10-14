@@ -225,3 +225,33 @@ repetition penalty against the 1,2,1,2 loop pattern.
   a double-loop race in the server job queue (a second `runner.loop()` thread
   competing with the main thread for jobs → intermittent "no Stream" errors)
   was found and removed.
+
+## 2026-10-14 (night) — dud-job guardrails (preflight + postflight)
+
+New `drama3_mac/guardrails.py`, WARN-vs-FAIL discipline like a real preflight
+system. FAIL findings refuse the job before any GPU work (`PreflightError`);
+WARN findings are reported and generation continues.
+
+- **Preflight**: checkpoint presence (shards/config/codec.pth with fix-it
+  messages), paired-tag balance (unclosed `<whisper>` = the whole render
+  whispers → FAIL; unknown tag names → WARN), prompt-capacity projection
+  (reference rows + text rows + history + generation budget vs the 8192-row
+  ceiling — the 30 s-reference + long-text decode-position overflow now dies
+  with numbers in the message instead of crashing mid-decode; >90% usage
+  warns), reference-clip health (too short/NaN → FAIL, >30 s and
+  near-silence → WARN). `engine.tts` runs all of it after chunking and
+  before generation.
+- **Postflight** (attached to `TTSResult.warnings`, printed by the CLI to
+  stderr, `X-Warnings` header on the server): finish=eos discipline (a chunk
+  cut off after <150 frames or EOS after <0.5 s warns) and a repetition-loop
+  detector over generated main-token codes (any 1-4-token pattern repeating
+  ≥6× back to back → WARN with chunk, pattern and frame position).
+- **--verify** (opt-in, CLI): STT-round-trips the output with mlx-whisper
+  medium.en and FAILS (exit 1) below a word-F1 threshold (default 0.8) — the
+  same bar as the acceptance suite, now available per render.
+- **sampling_plan**: per-chunk `(temperature, top_p)` pairs on
+  `engine.tts`, making the measured hybrid recipe (cool 0.7/0.85 narration,
+  hot 0.8/0.9 peaks) a one-call render; length mismatch is refused.
+- Live-checked against the real model: unclosed tag and wrong-length plan
+  refuse instantly, a real render with the cool plan returns clean warnings.
+  29 new unit tests; suite now 52 green.

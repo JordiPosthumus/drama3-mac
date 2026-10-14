@@ -48,6 +48,17 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         f"{gen.elapsed:.2f}s generate, {len(gen.frames)} frames, "
         f"finish={gen.finish_reason}, rtf={result.real_time_factor:.2f})"
     )
+    for warning in result.warnings:
+        print(warning, file=sys.stderr)
+    if args.verify:
+        from .guardrails import verify_roundtrip
+
+        verdict = verify_roundtrip(
+            out, args.text, threshold=args.verify_threshold
+        )
+        print(str(verdict))
+        if verdict.level == "FAIL":
+            return 1
     return 0
 
 
@@ -88,6 +99,11 @@ def main(argv: list[str] | None = None) -> int:
                      help="opt-in CTRL-style penalty on recently drawn semantic "
                           "codes (1.0 = off = Fish-faithful; Fish ignores its own "
                           "repetition_penalty field for Drama 3)")
+    syn.add_argument("--verify", action="store_true",
+                     help="STT-round-trip the output with mlx-whisper medium.en "
+                          "and fail below a word-similarity threshold")
+    syn.add_argument("--verify-threshold", type=float, default=0.8,
+                     help="minimum word-F1 for --verify (default 0.8)")
     _add_common(syn)
     syn.set_defaults(func=cmd_synthesize)
 

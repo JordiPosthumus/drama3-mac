@@ -32,6 +32,15 @@ PYTHONPATH=. .venv/bin/python -m drama3_mac.cli synthesize "Text here." \
 - Exit code 0 on success; the stdout line ends with `finish=eos|length` and
   `rtf=`. `finish=length` on a chunk means the frame budget was hit — fine
   for long scripts, suspicious for a short one.
+- **Guardrails**: preflight FAILs (unclosed `<tag>`, prompt-capacity overflow
+  from a long reference + long text, broken/short reference clips, missing
+  checkpoint files) refuse the job with a `PreflightError` naming the numbers;
+  postflight WARNs (suspicious chunk endings, repetition loops in the codes)
+  print on stderr and never fail the run. `--verify` additionally STT-round-
+  trips the output with mlx-whisper medium.en and exits 1 below word-F1 0.8.
+- Per-chunk sampling (`engine.tts(sampling_plan=[(0.7, 0.85), (0.8, 0.9)])`)
+  renders the measured hybrid recipe in one call: cool 0.7/0.85 narration,
+  hot 0.8/0.9 emotional peaks, ~30 s multi-take reference.
 - First call in a fresh process pays ~10–60 s of MLX compile/warmup before
   the first audio; steady-state RTF ≈ 0.68 (faster than real time).
 

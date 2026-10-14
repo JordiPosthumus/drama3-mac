@@ -255,3 +255,22 @@ WARN findings are reported and generation continues.
 - Live-checked against the real model: unclosed tag and wrong-length plan
   refuse instantly, a real render with the cool plan returns clean warnings.
   29 new unit tests; suite now 52 green.
+
+## 2026-10-14 (late night) — LANDING: the repo leads with what it is
+
+- **README reworked to lead with identity + measured results**: "the first
+  and only Mac/MLX port of Fish Audio Drama 3", a measured RTF table (q4 0.68
+  / q8 0.72 / bf16 0.77 — q8 now actually benched: 30.0 fps, 33.4 ms/step),
+  the measured voice-adherence table (speaker-embedding cosine vs reference:
+  baseline 0.895 → hybrid per-chunk sampling 0.919 → cool-sampling
+  single-shot 0.939), and the sampling recipe (cool 0.7/0.85 narration, hot
+  0.8/0.9 emotional peaks, ~30 s multi-take reference).
+- **Example audio committed** (gitignore negated for examples/ only; the
+  real-voice reference clips stay ignored): examples/jabberwocky/audio/ —
+  the six directed-chunk renders (whisper/terror/shout/glee) — and
+  examples/keeper-narration/consistency.wav, a 91 s story from 3 auto-chunks
+  rendered with the cool recipe (RTF 0.98) that Whisper round-trips verbatim;
+  per-folder READMEs explain what each demonstrates.
+- **sampling_plan plumbed through the HTTP server** (per-chunk [temp, top_p]
+  pairs, length-validated) alongside the engine support from the guardrails
+  milestone.

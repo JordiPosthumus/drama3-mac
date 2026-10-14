@@ -5,6 +5,12 @@ exercises the full Drama 3 direction system through this port: hushed
 storytelling, whispered warnings, proud resolve, shrieking terror, and a
 gleeful finale.
 
+**Listen:** [`audio/`](audio) holds the rendered performance, one file per
+directed chunk — `chunk-1.wav` … `chunk-6.wav` (chunk 5 is split into
+`chunk-5-shout.wav` + `chunk-5-aftermath.wav`). Rendered with a ~30 s
+multi-take reference at temperature 0.8 / top-p 0.9 ("hot" — theatrics live
+at emotional peaks; narration wants the cool 0.7/0.85 recipe from the README).
+
 ## Run it
 
 ```bash

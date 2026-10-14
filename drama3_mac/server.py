@@ -14,6 +14,8 @@ Endpoints:
       "single_chunk": false,              # true = one pass, no chunking
       "chunk_gap": 0.05,                  # silence between chunk audios (s)
       "repetition_penalty": 1.0,          # opt-in loop guard; 1.0 = off = Fish-faithful
+      "sampling_plan": [[0.7, 0.85], [0.8, 0.9]],  # optional per-chunk (temp, top_p);
+                                          # length must equal the chunk count
       "response_format": "wav" | "pcm_f32"           # default wav
     }
 
@@ -190,6 +192,11 @@ class _Handler(BaseHTTPRequestHandler):
             single_chunk=bool(request.get("single_chunk", False)),
             chunk_gap=float(request.get("chunk_gap", 0.05)),
             repetition_penalty=float(request.get("repetition_penalty", 1.0)),
+            sampling_plan=(
+                [tuple(p) for p in request["sampling_plan"]]
+                if request.get("sampling_plan") is not None
+                else None
+            ),
         )
         try:
             try:

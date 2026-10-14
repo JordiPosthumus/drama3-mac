@@ -1,26 +1,56 @@
-# drama3-mac — Fish Audio Drama 3 TTS on Apple Silicon
+# drama3-mac — Fish Audio Drama 3, running on your Mac
 
-An MLX port of [fishaudio/drama-3](https://huggingface.co/fishaudio/drama-3)
-(35B-parameter MoE speech model, ~3B active) that runs entirely on Apple
-Silicon — no CUDA anywhere. The backbone and audio-decoder tower run in MLX
-(Metal), the DAC codec in PyTorch (MPS). Voice cloning (multi-reference),
-automatic long-text chunking, theatric tag support, a CLI, and a local HTTP
-server included.
+**The first and only Mac/MLX port of [Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3)**
+— a 35B-parameter MoE speech model (~3B active) running entirely on Apple
+Silicon: MLX on Metal for the backbone and audio tower, PyTorch/MPS for the
+DAC codec, no CUDA anywhere. Voice cloning from a reference clip (multi-take
+supported), automatic long-text chunking, theatric tag support, a CLI, and a
+local HTTP server.
+
+**Faster than real time.** Measured on an M3 Ultra (512 GB unified memory):
+
+| checkpoint | steady-state RTF | peak RAM | on disk |
+|---|---|---|---|
+| experts-q4 (default) | **0.68** | 27.3 GB | 25.5 GB |
+| experts-q8 | 0.72 (30.0 fps) | 42.4 GB | 41.6 GB |
+| bf16 | **0.77** | 70.5 GB | 71.8 GB |
+
+(31.4 audio frames/s decode vs the 21.5 needed for real time; RTF = generate
+seconds ÷ audio seconds, so < 1.0 is faster than real time. First synthesis in
+a fresh process pays ~10–60 s of MLX compile/warmup — short clips show RTF
+1.0–1.4, long clips converge toward the steady state. bf16 is only ~13%
+slower than q4 because decode is Metal launch-bound: pick checkpoints for
+RAM, not speed.)
+
+**Voice cloning that holds, measured.** Speaker-embedding cosine against the
+reference voice (owner's adherence study, same prompt set):
+
+| recipe | cosine |
+|---|---|
+| baseline (single ~4 s take, fixed sampling) | 0.895 |
+| hybrid per-chunk sampling, 30 s multi-take reference | 0.919 |
+| cool-sampling single-shot, 30 s multi-take reference | **0.939** |
+
+**The sampling recipe behind those numbers:** render narration chunks *cool*
+(`--temperature 0.7 --top-p 0.85`) and emotional peaks *hot*
+(`--temperature 0.8 --top-p 0.9` — the per-chunk `sampling_plan` parameter
+does both in one call), and clone from a ~30 s multi-take reference instead
+of a single short take.
+
+**Hear it:** [`examples/jabberwocky/audio/`](examples/jabberwocky/audio) —
+the six-part Jabberwocky performance (whisper, terror, shout, glee), rendered
+from [`examples/jabberwocky/directed-chunks/`](examples/jabberwocky/directed-chunks);
+and [`examples/keeper-narration/consistency.wav`](examples/keeper-narration/consistency.wav),
+a 91 s story stitched from 3 auto-chunks with the cool recipe — one voice,
+one pacing, no seam artifacts.
 
 > **Status (2026-10-14): working and verified.**
 > Acceptance bar: a clip is accepted only if Whisper medium.en transcribes it
 > back to the prompt. 3/3 accepted on the default checkpoint (two plain
 > prompts + one cloning run), long theatric scripts round-trip when chunked,
-> and the layer-parity suite is green. The one serious bug found so far
-> (gibberish from over-quantized projections) is fixed and documented in
-> [docs/JOURNEY.md](docs/JOURNEY.md).
-
-**Performance** on an M3 Ultra (512 GB unified memory), experts-q4 checkpoint:
-31.4 audio frames/s, steady-state **RTF ≈ 0.68** — faster than real time.
-First synthesis in a fresh process pays ~10–60 s of MLX compile/warmup; short
-clips therefore show RTF 1.0–1.4, long clips converge toward 0.7.
-
-This is believed to be the first open Mac/MLX port of Drama 3.
+> and the layer-parity suite is green (52 tests). The one serious bug found
+> so far (gibberish from over-quantized projections) is fixed and documented
+> in [docs/JOURNEY.md](docs/JOURNEY.md).
 
 ## Installation
 
@@ -94,16 +124,24 @@ PYTHONPATH=. python -m drama3_mac.cli synthesize "The quick brown fox jumps over
 ### CLI
 
 ```bash
-# plain synthesis
+# plain synthesis; long text is auto-chunked at sentence boundaries
+# (28 s budget per chunk, 50 ms stitch gaps)
 drama3 synthesize "Hello from Drama 3, running natively on Apple Silicon." -o hello.wav
 
-# voice cloning (5–10 s clean clip + its transcript; multiple references help)
+# voice cloning (5–10 s clean clip + its transcript; a 30 s multi-take
+# reference adheres best — see the measured table above)
 drama3 synthesize "Now I sound like the reference." -o cloned.wav \
     --ref sample.wav --ref-text "Transcript of the reference clip."
 
-# long text is auto-chunked at sentence boundaries (28 s budget per chunk,
-# 50 ms stitch gaps); force one pass with --single-chunk (not recommended
-# for long theatric scripts)
+# the measured recipe, one call: per-chunk sampling (cool narration, hot peaks)
+#   (engine.tts accepts sampling_plan=[(0.7, 0.85), (0.8, 0.9), ...])
+
+# verify a render end-to-end: Whisper medium.en transcribes it back and the
+# command FAILS below word-F1 0.8; guardrail warnings print on stderr
+drama3 synthesize "Text to check." -o checked.wav --verify
+
+# force one pass with --single-chunk (not recommended for long theatric
+# scripts; preflight refuses jobs that cannot fit the prompt budget)
 
 # serve
 drama3 serve --model checkpoints/drama3-q4 --port 8843
@@ -225,6 +263,7 @@ drama3_mac/
   codec_dac.py   # vendored DAC codec (inference only)
   codec.py       # encode/decode wrappers
   prompt.py      # Drama 3 prompt template
+  guardrails.py  # preflight refusal + postflight warnings (FAIL/WARN levels)
   generate.py    # chunked prefill + decode loop
   engine.py      # high-level TTS engine (chunking, multi-reference, stitching)
   cli.py         # `drama3` command
@@ -232,7 +271,8 @@ drama3_mac/
   gated_delta.py # vendored Apple Metal kernel (MIT)
 scripts/         # benchmark, acceptance suite, memory measurement, probes
 tests/           # parity tests vs the PyTorch reference + chunking tests
-examples/        # Jabberwocky theatric showcase
+examples/        # Jabberwocky theatric showcase (with rendered audio) and
+                 # a 91 s chunk-consistency demo
 docs/JOURNEY.md  # dated port log with every bug hunt
 AGENTS.md        # quickstart for coding agents
 ```

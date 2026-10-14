@@ -1,0 +1,16 @@
+# local artifacts — never commit
+model/
+checkpoints/
+research/
+logs/
+outputs/
+assets/
+*.wav
+*.npy
+*.pth
+*.safetensors
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

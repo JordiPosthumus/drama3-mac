@@ -149,20 +149,60 @@ drama3 serve --model checkpoints/drama3-q4 --port 8843
 
 ### HTTP server
 
+The server is a production TTS API designed for pipeline consumers (built
+against the needs of a per-line podcast renderer): named voices, a JSON
+envelope with quality metrics, deterministic seeds, a line cache, an
+auto-retry ladder, line mode, and batch.
+
 ```bash
-curl -s localhost:8843/health
-curl -s localhost:8843/v1/tts -H 'Content-Type: application/json' \
-  -d '{"text": "Local server test."}' -o out.wav
+drama3 serve --port 8843                # voices persist under ./voices (git-ignored)
 ```
 
-Request fields: `text` (required), `reference_audio_b64` + `reference_text`
-(optional, cloning; repeat requests with the same clip bytes skip the encode
-via a content-hash cache), `temperature` (0.8), `top_k` (30), `top_p` (0.9),
-`max_new_tokens` (0 = auto), `single_chunk` (false), `chunk_gap` (0.05),
-`response_format` (`wav` | `pcm_f32`). Responses carry `X-Generation-Seconds`,
-`X-Frames`, `X-Real-Time-Factor` headers. `repetition_penalty` is deliberately
-ignored — Drama 3 uses repetition-aware sampling instead. Requests are
-serialized; all inference runs on the server's main thread.
+| endpoint | what it does |
+|---|---|
+| `GET /health` | liveness + model info + cache stats |
+| `POST /v1/voices` | `{name, audio_b64, text, recipe{temperature, top_p, top_k, repetition_penalty}}` — persists a named voice (multi-take: `audio_b64` as array) |
+| `GET /v1/voices`, `GET /v1/voices/{name}` | list / inspect |
+| `DELETE /v1/voices/{name}` | remove |
+| `POST /v1/tts` | render one take (see below) |
+| `POST /v1/batch` | `{lines: [{text, voice, line_id, ...}]}` — sequential renders through one warm model, per-line envelope array |
+| `GET /v1/cache` | line-cache stats (entries, hits, misses, hit_rate) |
+
+`/v1/tts` request fields: `text` (required); `voice` (name from the registry)
+**or** explicit `reference_audio_b64` + `reference_text` (never both);
+`temperature`/`top_p`/`top_k`/`repetition_penalty` (voice recipe fills
+defaults, explicit values win); `seed` (deterministic — same seed + params =
+bit-identical take); `line` (true = one clean segment: no internal chunking,
+no baked gaps or edge fades — your assembler owns junctions); `retry`
+(default true: on `finish=length` for short text the server resplits and
+retries up to 2× and only returns EOS-clean audio, else HTTP 422 with the
+attempt list); `response_format` (`wav` default | `pcm_f32` | `json`).
+
+`response_format=json` returns the envelope:
+
+```json
+{
+  "ok": true,
+  "audio_b64": "<16-bit PCM wav>",
+  "duration_s": 4.213,
+  "rms": 0.0663,
+  "f0_hz_median": 120.8,
+  "finish_reason": "eos",
+  "rtf": 1.35,
+  "seed": 1234,
+  "request_echo": {"text": "...", "voice": "narrator", "seed": 1234},
+  "attempts": [{"attempt": 1, "seed": 1234, "finish_reason": "eos", "chunks": 1}],
+  "warnings": [],
+  "cache": "miss"
+}
+```
+
+`f0_hz_median` is a cheap numpy-autocorrelation estimate (energy-gated,
+60–400 Hz band); `duration_s`/`rms`/`f0_hz_median` are measured on the
+returned audio so a caller can gate lines before saving. Raw `wav` stays the
+default mode; wav/pcm responses keep the `X-Real-Time-Factor`, `X-Frames`,
+`X-Generation-Seconds` and `X-Warnings` headers. Requests are serialized; all
+inference runs on the server's loader thread.
 
 ### Direct Python
 

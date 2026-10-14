@@ -5,6 +5,7 @@ research/
 logs/
 outputs/
 assets/
+voices/
 *.wav
 # committed example renders (public-domain text / original narration only;
 # the real-voice reference clips stay in assets/, ignored)

@@ -275,3 +275,37 @@ WARN findings are reported and generation continues.
 - **sampling_plan plumbed through the HTTP server** (per-chunk [temp, top_p]
   pairs, length-validated) alongside the engine support from the guardrails
   milestone.
+
+## 2026-10-15 — production TTS API for the podcast pipeline + blocker fix
+
+- **Blocker (owner-reported): multi-speaker + auto-chunk crash.** engine.tts
+  with <|speaker:N|> tags and default chunking died with AttributeError
+  'list' has no attribute 'strip' at prompt.validate_text. Root cause: the
+  chunk_bytes edit earlier that day had turned the engine's chunks assignment
+  from a conditional expression into a list literal, wrapping the whole
+  split list as one element. Restored the expression (with a guard comment),
+  made validate_chunks normalize group-shaped chunks in place, regression
+  tests at both levels; the owner's exact repro (2 refs + speaker tags +
+  auto-chunk) now renders 29.3 s EOS-clean.
+- **Production API** (designed for ~/MakeAPod's per-line gates: dur 1.2-35 s,
+  rms>0.02, f0 60-220 Hz, identity margin, junction-flow law — MakeAPod not
+  modified): voice registry on disk (POST/GET/DELETE /v1/voices, multi-take
+  clips, range-validated recipe, content-hashed), JSON envelope with
+  measured duration/rms/median-f0 (numpy autocorrelation, no new deps),
+  deterministic seeds (same seed+params = bit-identical take, verified
+  end-to-end), line cache keyed hash(voice, text, params, seed) with stats,
+  auto-retry ladder (finish=length on short text resplits 300→150→75 B up
+  to 2 retries, EOS-clean only, HTTP 422 on exhaustion, retry=false opt-out),
+  line mode (one clean segment, no chunking/gaps/fades — the assembler owns
+  junctions), and batch (sequential warm-model renders, mx.clear_cache()
+  per line, per-line envelopes with error capture).
+- **Three server bugs caught by the integration suite before they shipped**:
+  warmup routed through the runner before loop() started (boot deadlock),
+  runner.call without **kwargs (render crashed), and the queued runner path
+  missing `return box["result"]` (every JSON response was `null` — the
+  direct-service tests passed, only the HTTP layer broke; bit-identical
+  seed determinism was confirmed only after this fix).
+- Suite: 87 fast + 6 real-server integration tests = 93 green. The
+  integration module boots the actual server on an ephemeral port and
+  exercises voice lifecycle, envelope fields, seed determinism, line mode,
+  batch + cache stats, and wav default.

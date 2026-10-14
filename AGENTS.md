@@ -94,6 +94,35 @@ result.chunks             # number of generated chunks (long text)
 3. For long scripts: listen for loop artifacts at chunk seams; every chunk
    should end `finish=eos`.
 
+## HTTP server
+
+The server is a production TTS API for pipeline consumers (designed for a
+per-line podcast renderer). Start it with `drama3 serve --port 8843`.
+
+- **Voices**: `POST /v1/voices {name, audio_b64, text, recipe{temperature,
+  top_p, top_k, repetition_penalty}}` persists a named voice (refs on disk,
+  git-ignored; multi-take = `audio_b64` as an array). Renders accept
+  `voice=name`; the voice recipe fills sampling defaults, explicit request
+  params win. `GET /v1/voices`, `GET /v1/voices/{name}`,
+  `DELETE /v1/voices/{name}`.
+- **JSON envelope**: `response_format=json` returns `{audio_b64,
+  duration_s, rms, f0_hz_median, finish_reason, rtf, seed, request_echo,
+  attempts, warnings, cache, ok}` — metrics are measured on the returned
+  audio (cheap numpy autocorrelation f0), so callers can gate lines before
+  saving. Raw `wav` stays the default.
+- **Seeds + cache**: `seed` makes renders deterministic (same seed + params
+  = bit-identical take, verified); results cache under
+  hash(voice, text, params, seed); `GET /v1/cache` gives hit/miss stats.
+- **Retry ladder**: on `finish=length` for short-ish text the server resplits
+  (300→150→75 B) and retries up to 2×, returning EOS-clean audio only —
+  exhaustion is HTTP 422 with the attempt list. `retry=false` opts out.
+- **Line mode**: `line=true` renders one clean segment — no internal
+  chunking, no baked gaps or edge fades (the consumer's assembler owns
+  junction flow).
+- **Batch**: `POST /v1/batch {lines: [{text, voice, line_id, ...}]}` renders
+  sequentially through one warm model, `mx.clear_cache()` per line,
+  per-line envelope array with error capture.
+
 ## Known limits
 
 - Quantized projections are forbidden (gibberish; see README).

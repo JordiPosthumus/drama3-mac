@@ -3,53 +3,90 @@
 An MLX port of [fishaudio/drama-3](https://huggingface.co/fishaudio/drama-3)
 (35B-parameter MoE speech model, ~3B active) that runs entirely on Apple
 Silicon — no CUDA anywhere. The backbone and audio-decoder tower run in MLX
-(Metal), the DAC codec in PyTorch (MPS). Voice cloning from a short reference
-clip, a CLI, and a local HTTP server included.
+(Metal), the DAC codec in PyTorch (MPS). Voice cloning (multi-reference),
+automatic long-text chunking, theatric tag support, a CLI, and a local HTTP
+server included.
 
-> **Status (2026-10-14): intelligible. Acceptance suite passed.**
-> A clip is accepted only if Whisper medium.en transcribes it back to the
-> prompt. On the default experts-q4 checkpoint (25.5 GB) with natural sampling
-> defaults: 3/3 accepted — two plain-synthesis prompts (f1 0.90 / 1.00) and a
-> voice-cloning run (f1 1.00). Steady-state decode RTF ≈ 0.68. The earlier
-> gibberish-audio bug was over-quantization of the attention/GDN projections;
-> the converter now quantizes experts only, mirroring the FP8 release.
-> Full story in [docs/JOURNEY.md](docs/JOURNEY.md).
+> **Status (2026-10-14): working and verified.**
+> Acceptance bar: a clip is accepted only if Whisper medium.en transcribes it
+> back to the prompt. 3/3 accepted on the default checkpoint (two plain
+> prompts + one cloning run), long theatric scripts round-trip when chunked,
+> and the layer-parity suite is green. The one serious bug found so far
+> (gibberish from over-quantized projections) is fixed and documented in
+> [docs/JOURNEY.md](docs/JOURNEY.md).
 
-**Performance** on an M3 Ultra (512 GB unified memory): 31.4 audio frames/s
-during decode, steady-state **RTF ≈ 0.68** — faster than real time, verified
-intelligible via Whisper round-trip. The default experts-q4 checkpoint needs
-~25 GB of RAM; experts-q8 ~42 GB; bf16 ~72 GB.
+**Performance** on an M3 Ultra (512 GB unified memory), experts-q4 checkpoint:
+31.4 audio frames/s, steady-state **RTF ≈ 0.68** — faster than real time.
+First synthesis in a fresh process pays ~10–60 s of MLX compile/warmup; short
+clips therefore show RTF 1.0–1.4, long clips converge toward 0.7.
 
 This is believed to be the first open Mac/MLX port of Drama 3.
 
-## What's implemented
+## Installation
 
-| Component | Approach |
-|---|---|
-| Text backbone (Qwen3-Next-style hybrid) | MLX: 30 GatedDeltaNet (linear attention) + 10 full-attention layers, sigmoid-gated outputs, zero-centered RMSNorm, partial neox RoPE, QK-norm |
-| MoE (128 experts, top-8, sigmoid gating + shared expert) | FP8 block-scaled weights are **dequantized at conversion time** (Metal has no FP8 GEMM), then optionally quantized to 4/8-bit for MLX `quantized_matmul` |
-| GatedDeltaNet kernel | Apple's packed Metal kernel, vendored from [mlx-lm](https://github.com/mlx-explore/mlx-lm) (MIT) |
-| Audio tower (Codebook-MTP, 10 codebooks) | MLX, with RAS retry sampling (window 16 frames, top-k 30, top-p 0.95) |
-| DAC codec (44.1 kHz) | PyTorch/MPS, vendored inference path from fish-speech's modded DAC |
-| Decode hot path | Per-layer compiled graphs (`mx.compile`); caches threaded explicitly; position-dependent writes via `put_along_axis` |
+Requires an Apple Silicon Mac (M1 or later; M3 Ultra used for all numbers
+here), macOS with Metal, and ~120 GB free disk for the download + one
+converted checkpoint.
 
-## Setup
+### 1. Python environment
 
-Requires an Apple Silicon Mac, Python ≥ 3.10, and ~40 GB free disk for the
-model. MLX ≥ 0.29, PyTorch ≥ 2.6 (MPS), soundfile, soxr, tokenizers, einops,
-safetensors, numpy.
+With [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
-# 1. download the original checkpoint (~40 GB)
+git clone https://github.com/JordiPosthumus/drama3-mac.git
+cd drama3-mac
+uv venv .venv --python 3.12
+uv pip install -e .
+uv pip install pytest  # optional, for the test suite
+```
+
+Or with plain venv:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Core dependencies (installed by `-e .`): mlx ≥ 0.29, torch ≥ 2.6 (MPS),
+numpy, safetensors, tokenizers, einops, soundfile, soxr.
+
+### 2. Download the original checkpoint (~40 GB)
+
+```bash
 huggingface-cli download fishaudio/drama-3 --local-dir model
+```
 
-# 2. convert to an MLX checkpoint (4-bit experts by default; projections stay bf16)
-python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-q4 --bits 4
-#    experts-q8: --bits 8 (~42 GB)   bf16: --bits 16 (~72 GB)
-#    NOTE: do not pass --quantize-projections; quantizing the attention/GDN
-#    projections compounds noise until the model speaks gibberish (see docs/JOURNEY.md)
+This lands `model/codec.pth` (the DAC codec) next to the safetensors shards —
+that is exactly where the engine looks for it. If you keep the codec
+elsewhere, pass `--codec /path/to/codec.pth`.
 
-# 3. put codec.pth where the engine can find it (default: model/codec.pth)
+### 3. Convert to an MLX checkpoint
+
+```bash
+PYTHONPATH=. python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-q4 --bits 4
+```
+
+| variant | command | on disk | peak RAM (measured) | use it for |
+|---|---|---|---|---|
+| **experts-q4** (default) | `--bits 4` | 25.5 GB | **27.3 GB** | everyday use, fastest |
+| experts-q8 | `--bits 8` | 41.6 GB | **42.4 GB** | marginally higher fidelity |
+| bf16 | `--bits 16` | 71.8 GB | **70.5 GB** | validation/reference |
+
+RAM measured as peak process RSS during a real generation
+(`scripts/measure_memory.py`); you want headroom above the listed number.
+
+> ⚠️ **Never pass `--quantize-projections`.** Quantizing the attention/GDN
+> projections (not just the experts) compounds noise through the 40-layer
+> residual stream until the model speaks fluent gibberish. The FP8 release
+> keeps everything except the experts in bf16, and so does this converter by
+> default. Full root-cause story in [docs/JOURNEY.md](docs/JOURNEY.md).
+
+### 4. Sanity check
+
+```bash
+PYTHONPATH=. python -m pytest tests/ -q          # 19 tests, ~3 s
+PYTHONPATH=. python -m drama3_mac.cli synthesize "The quick brown fox jumps over the lazy dog." -o outputs/first.wav
 ```
 
 ## Usage
@@ -57,22 +94,22 @@ python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-q4 --bi
 ### CLI
 
 ```bash
-# plain synthesis (voice #0 by default)
+# plain synthesis
 drama3 synthesize "Hello from Drama 3, running natively on Apple Silicon." -o hello.wav
 
-# voice cloning: 5-10 s clean clip + its transcript
+# voice cloning (5–10 s clean clip + its transcript; multiple references help)
 drama3 synthesize "Now I sound like the reference." -o cloned.wav \
     --ref sample.wav --ref-text "Transcript of the reference clip."
 
+# long text is auto-chunked at sentence boundaries (28 s budget per chunk,
+# 50 ms stitch gaps); force one pass with --single-chunk (not recommended
+# for long theatric scripts)
+
 # serve
-drama3 serve --port 8843
+drama3 serve --model checkpoints/drama3-q4 --port 8843
 ```
 
 ### HTTP server
-
-```bash
-drama3 serve --model checkpoints/drama3-q4 --port 8843
-```
 
 ```bash
 curl -s localhost:8843/health
@@ -81,11 +118,68 @@ curl -s localhost:8843/v1/tts -H 'Content-Type: application/json' \
 ```
 
 Request fields: `text` (required), `reference_audio_b64` + `reference_text`
-(optional, enables cloning), `temperature` (0.8), `top_k` (30), `top_p` (0.9),
-`max_new_tokens` (2048), `response_format` (`wav` | `pcm_f32`).
-Responses carry `X-Generation-Seconds`, `X-Frames`, `X-Real-Time-Factor`
-headers. Reference clips are encoded once and cached by content hash.
-Requests are serialized; all inference runs on the server's main thread.
+(optional, cloning; repeat requests with the same clip bytes skip the encode
+via a content-hash cache), `temperature` (0.8), `top_k` (30), `top_p` (0.9),
+`max_new_tokens` (0 = auto), `single_chunk` (false), `chunk_gap` (0.05),
+`response_format` (`wav` | `pcm_f32`). Responses carry `X-Generation-Seconds`,
+`X-Frames`, `X-Real-Time-Factor` headers. `repetition_penalty` is deliberately
+ignored — Drama 3 uses repetition-aware sampling instead. Requests are
+serialized; all inference runs on the server's main thread.
+
+### Direct Python
+
+```python
+from drama3_mac.engine import Drama3Engine
+
+engine = Drama3Engine("checkpoints/drama3-q4")
+result = engine.tts(
+    "Long scripts are chunked automatically at sentence boundaries.",
+    reference_audio=["a.wav", "b.wav"],            # multi-reference cloning
+    reference_text=["transcript a", "transcript b"],
+)
+engine.save(result, "out.wav")
+```
+
+## Directing the performance (tag syntax)
+
+Drama 3 reads stage directions natively. See
+[examples/jabberwocky](examples/jabberwocky) for a full six-part showcase.
+
+- **`[square-bracket cues]`** — free-form directions, pauses and sounds the
+  model interprets but does not speak:
+  `[pause]`, `[long pause]`, `[small laugh]`, `[calm, measured voice]`,
+  `[door creaks slowly]`.
+- **`<tag>…</tag>` paired tags** change delivery of the enclosed span:
+  `whisper`, `emphasis`, `soft`, `fast`, `slow`, `stress`, `forceful`.
+
+  ```text
+  <whisper>Beware the Jabberwock, my son!</whisper>
+  The spreadsheet... looked... <emphasis>fine</emphasis>.
+  ```
+
+- **Speakers**: prefix a line with `<|speaker:0|>` … `<|speaker:15|>`; the
+  auto-chunker keeps at most 3 speakers per chunk.
+- Cues and paired tags are protected spans — chunking never splits them.
+
+## Performance notes (M3 Ultra)
+
+| metric (experts-q4) | value |
+|---|---|
+| decode step | 31.8 ms mean (p50 31.9, p90 32.4) |
+| frames/s | 31.4 (need 21.5 for real time) |
+| steady-state RTF | ≈ 0.68 (experts-q4) / ≈ 0.77 (bf16) |
+| prefill | ~1.9 s for a 31-row prompt |
+| RAM | 27.3 GB peak RSS |
+
+bf16 is only ~13% slower than q4 in steady state — decode is launch-bound, so
+precision costs almost nothing at this scale; pick checkpoints for RAM, not
+speed.
+
+Decode is GPU kernel-launch-bound (~1500 small Metal kernels per step), not
+bandwidth-bound: the ~7 GB of weights read per step would allow ~9 ms at peak
+bandwidth. CUDA-graph capture does not exist on Metal; per-layer compiled
+graphs (`mx.compile`) with explicitly threaded caches already removed the CPU
+dispatch overhead. Benchmarks: `scripts/bench_decode.py <checkpoint>`.
 
 ## How it works
 
@@ -93,22 +187,28 @@ Requests are serialized; all inference runs on the server's main thread.
    one main token (text/special tokens) + 10 audio codebook tokens per row,
    wrapped in Drama 3's `<|im_start|>`/`<|text|>`/`<|voice|>` template with a
    speaker tag (`<|speaker:0|>` … `<|speaker:15|>`).
-2. **Reference encode** — the DAC codec converts the reference clip to 10-row
-   codes (row 0 = semantic codebook, vocab 4096; rows 1–9 = residual, 1024),
-   ~21.5 frames/s of audio.
-3. **Prefill** — chunked teacher-forced pass over the prompt rows builds the
+2. **Reference encode** — the DAC codec converts each reference clip to
+   10-row codes (row 0 = semantic codebook, vocab 4096; rows 1–9 = residual,
+   1024), ~21.5 frames/s of audio. All references become `[Reference N]`
+   prompt blocks.
+3. **Long-text chunking** — text over ~300 bytes is split at sentence
+   boundaries (protected spans kept whole); each chunk is generated with a
+   ~28 s frame budget, and the first + latest chunks feed back as history so
+   voice and pacing stay consistent.
+4. **Prefill** — chunked teacher-forced pass over the prompt rows builds the
    backbone's recurrent (GatedDeltaNet) and KV caches.
-4. **Decode** — each step: backbone predicts the next main token over
+5. **Decode** — each step: backbone predicts the next main token over
    (EOS + semantic band); the tower predicts the 10 codebook tokens for that
    frame. RAS sampling re-rolls the first codebook within a 16-frame window
-   when a low-rank candidate wins, keeping long generations stable.
-5. **Reconstruction** — `codec.pth` (modded DAC + downsampled RVQ) decodes the
-   code matrix to 44.1 kHz audio.
+   when a repeated candidate wins, keeping long generations stable.
+6. **Reconstruction** — `codec.pth` (modded DAC + downsampled RVQ) decodes
+   each chunk's code matrix to 44.1 kHz audio; chunks are stitched with a
+   small gap.
 
 Numerics were validated layer-by-layer against the fish-speech PyTorch
 reference (`tests/`): norms, RoPE, full attention, GatedDeltaNet prefill and
-recurrent decode, MoE routing, and tower prefill/decode all match within
-2e-3 (GDN) / 2e-4 (everything else) at bf16.
+recurrent decode, MoE routing, tower prefill/decode, and the chunk splitter
+(byte-identical) — 19 tests, all green.
 
 ## Repository layout
 
@@ -121,35 +221,21 @@ drama3_mac/
   moe.py         # sparse MoE: gathered (decode) and grouped (prefill) paths
   backbone.py    # 40-layer hybrid decoder
   tower.py       # Codebook-MTP audio tower + RAS sampling
+  chunking.py    # long-text chunking + history (port of fish_omni.chunking)
   codec_dac.py   # vendored DAC codec (inference only)
   codec.py       # encode/decode wrappers
   prompt.py      # Drama 3 prompt template
   generate.py    # chunked prefill + decode loop
-  engine.py      # high-level TTS engine
+  engine.py      # high-level TTS engine (chunking, multi-reference, stitching)
   cli.py         # `drama3` command
   server.py      # local HTTP server
   gated_delta.py # vendored Apple Metal kernel (MIT)
-scripts/         # conversion checks, benchmark, first end-to-end run
-tests/           # parity tests vs the PyTorch reference
+scripts/         # benchmark, acceptance suite, memory measurement, probes
+tests/           # parity tests vs the PyTorch reference + chunking tests
+examples/        # Jabberwocky theatric showcase
+docs/JOURNEY.md  # dated port log with every bug hunt
+AGENTS.md        # quickstart for coding agents
 ```
-
-## Performance notes
-
-Measured on M3 Ultra, q4 checkpoint, 31-row prompt (scripts/bench_decode.py):
-
-| metric | value |
-|---|---|
-| prefill (31 rows) | 1.9 s |
-| decode step | 31.8 ms mean (p50 31.9, p90 32.4) |
-| frames/s | 31.4 (need 21.5 for real time) |
-| steady-state RTF | ≈ 0.68 (experts-q4) |
-| RAM (experts-q4) | ~25 GB |
-
-The step time is GPU-kernel-launch-bound (~1500 small kernels per step on
-Metal), not bandwidth-bound (~7 GB of weights read per step would allow ~9 ms
-at peak bandwidth). CUDA-graph-style capture isn't available on Metal; the
-per-layer compiled graphs and explicit cache threading already removed the
-CPU dispatch overhead.
 
 ## License
 

@@ -36,7 +36,7 @@ huggingface-cli download fishaudio/drama-3 --local-dir model
 
 # 2. convert to an MLX checkpoint (4-bit experts by default)
 python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-q4 --bits 4
-#    or bf16: --bits 16   (~72 GB)
+#    also available: --bits 8 (~40 GB), --bits 16 bf16 (~72 GB)
 
 # 3. put codec.pth where the engine can find it (default: model/codec.pth)
 ```
@@ -131,7 +131,7 @@ Measured on M3 Ultra, q4 checkpoint, 31-row prompt (scripts/bench_decode.py):
 | prefill (31 rows) | 1.6 s |
 | decode step | 27.5 ms mean (p50 27.4, p90 27.9) |
 | frames/s | 36.4 (need 21.5 for real time) |
-| steady-state RTF | ≈ 0.59 |
+| steady-state RTF | ≈ 0.59 (q4) / ≈ 0.68 (q8) |
 | RAM (q4) | ~24 GB |
 
 The step time is GPU-kernel-launch-bound (~1500 small kernels per step on

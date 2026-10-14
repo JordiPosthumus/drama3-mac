@@ -6,7 +6,11 @@ waste the M-series memory bandwidth.  This pass runs once per precision:
 
 * experts are dequantized to bf16, stacked per layer (``w13`` = gate rows then
   up rows, ``w2`` = down), and quantized to 4/8-bit (or kept bf16 with ``--bits 16``)
-* attention / linear-attention projections are quantized the same way
+* by default ONLY the experts are quantized — this mirrors the FP8 release,
+  which stores experts in fp8 and everything else in bf16.  Quantizing the
+  attention/GDN projections too (``--quantize-projections``) saves ~2 GB but
+  compounds noise through the 40-layer residual stream until semantic-token
+  selection degrades (verified: bf16 perfect, q8-with-projections gibberish)
 * embeddings, the lm head, the router, norms and the audio tower stay bf16
   (the lm head and logits need the range; everything else is tiny)
 
@@ -132,6 +136,7 @@ def convert(
     *,
     bits: int,
     group_size: int = 64,
+    quantize_projections: bool = False,
 ) -> None:
     started = time.perf_counter()
     config = json.loads((checkpoint / "config.json").read_text())
@@ -182,10 +187,15 @@ def convert(
             put(f"{base}.mlp.experts.w2.weight", w2)
         del w13, w2
 
-        for suffix in QUANTIZED_PROJ_SUFFIXES:
+        for suffix in QUANTIZED_PROJ_SUFFIXES if quantize_projections else ():
             key = f"{base}.{suffix}"
             if key in reader.weight_map:
                 put_linear(key[: -len(".weight")], reader.get(key))
+        if not quantize_projections:
+            for suffix in QUANTIZED_PROJ_SUFFIXES:
+                key = f"{base}.{suffix}"
+                if key in reader.weight_map:
+                    put(key, reader.get(key))
 
         for name in (
             "mlp.gate.weight",
@@ -242,8 +252,20 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--bits", type=int, choices=(4, 8, 16), default=4)
     parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=64)
+    parser.add_argument(
+        "--quantize-projections",
+        action="store_true",
+        help="also quantize attention/GDN/shared-expert projections; "
+        "default keeps them bf16 like the FP8 release (recommended)",
+    )
     args = parser.parse_args()
-    convert(args.checkpoint, args.out, bits=args.bits, group_size=args.group_size)
+    convert(
+        args.checkpoint,
+        args.out,
+        bits=args.bits,
+        group_size=args.group_size,
+        quantize_projections=args.quantize_projections,
+    )
 
 
 if __name__ == "__main__":

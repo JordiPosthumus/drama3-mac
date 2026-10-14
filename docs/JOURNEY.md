@@ -135,8 +135,18 @@ default changed; `--quantize-projections` exists for the adventurous.
 
 ## Status
 
-- Intelligibility restored via experts-only quantization; greedy round-trip
-  verified on eq8 and eq4.
-- In progress: full acceptance suite — natural-sampling defaults
-  (temperature 0.8), a cloning run, three prompts through Whisper
-  medium.en, RTF benchmarks for the new default checkpoint.
+- **ACCEPTED 2026-10-14**: full suite on the default experts-q4 checkpoint
+  (25.5 GB), natural sampling defaults (temperature 0.8, top-k 30, top-p 0.9),
+  Whisper medium.en round-trip, token-F1 ≥ 0.8:
+
+  | case | prompt | heard | f1 | RTF |
+  |---|---|---|---|---|
+  | plain-a | Drama three runs entirely on Apple silicon with no CUDA. | Drama 3 runs entirely on Apple Silicon with no CUDA. | 0.90 | 1.20 |
+  | plain-b | The quick brown fox jumps over the lazy dog. | The quick brown fox jumps over the lazy dog. | 1.00 | 0.85 |
+  | clone-c (cloning) | Testing voice cloning with my own reference clip on the Mac. | Testing voice cloning with my own reference clip on the Mac. | 1.00 | 1.00 |
+
+- Steady-state decode (experts-q4): 31.4 frames/s, RTF ≈ 0.68 (31.8 ms/step).
+  Slightly slower than the earlier broken q4 (27.5 ms) because the attention/
+  GDN projections are now bf16 — the correct trade for intelligibility.
+- experts-q8 (41.6 GB) and bf16 (71.8 GB) also verified intelligible.
+- Suite: `scripts/acceptance.py` (run it against any checkpoint).

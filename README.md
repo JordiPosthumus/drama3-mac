@@ -6,22 +6,19 @@ Silicon — no CUDA anywhere. The backbone and audio-decoder tower run in MLX
 (Metal), the DAC codec in PyTorch (MPS). Voice cloning from a short reference
 clip, a CLI, and a local HTTP server included.
 
-> **⚠️ WORK IN PROGRESS — intelligibility restored; acceptance suite running.**
-> 2026-10-14: the gibberish-audio bug was root-caused and fixed — the converter
-> was quantizing the attention/GDN projections on top of the experts, and that
-> noise compounds through the 40-layer residual stream until phoneme selection
-> breaks. The fix is **experts-only quantization** (mirroring the FP8 release,
-> which keeps everything but the experts in bf16). Verified: greedy decode of
-> "The quick brown fox jumps over the lazy dog." now transcribes back exactly
-> via Whisper medium.en on the experts-q8 checkpoint (experts-q4 also round-trips).
-> Still in progress: the full acceptance suite (natural-sampling temperature,
-> voice-cloning run, three prompts, RTF benchmarks) — results to follow.
+> **Status (2026-10-14): intelligible. Acceptance suite passed.**
+> A clip is accepted only if Whisper medium.en transcribes it back to the
+> prompt. On the default experts-q4 checkpoint (25.5 GB) with natural sampling
+> defaults: 3/3 accepted — two plain-synthesis prompts (f1 0.90 / 1.00) and a
+> voice-cloning run (f1 1.00). Steady-state decode RTF ≈ 0.68. The earlier
+> gibberish-audio bug was over-quantization of the attention/GDN projections;
+> the converter now quantizes experts only, mirroring the FP8 release.
 > Full story in [docs/JOURNEY.md](docs/JOURNEY.md).
 
-**Performance** on an M3 Ultra (512 GB unified memory): ~36 audio frames/s
-during decode, steady-state **RTF ≈ 0.59** — faster than real time. The
-quantized (4-bit experts) checkpoint needs ~24 GB of RAM; the bf16 checkpoint
-needs ~72 GB.
+**Performance** on an M3 Ultra (512 GB unified memory): 31.4 audio frames/s
+during decode, steady-state **RTF ≈ 0.68** — faster than real time, verified
+intelligible via Whisper round-trip. The default experts-q4 checkpoint needs
+~25 GB of RAM; experts-q8 ~42 GB; bf16 ~72 GB.
 
 This is believed to be the first open Mac/MLX port of Drama 3.
 
@@ -142,11 +139,11 @@ Measured on M3 Ultra, q4 checkpoint, 31-row prompt (scripts/bench_decode.py):
 
 | metric | value |
 |---|---|
-| prefill (31 rows) | 1.6 s |
-| decode step | 27.5 ms mean (p50 27.4, p90 27.9) |
-| frames/s | 36.4 (need 21.5 for real time) |
-| steady-state RTF | ≈ 0.59 (q4) / ≈ 0.68 (q8) |
-| RAM (q4) | ~24 GB |
+| prefill (31 rows) | 1.9 s |
+| decode step | 31.8 ms mean (p50 31.9, p90 32.4) |
+| frames/s | 31.4 (need 21.5 for real time) |
+| steady-state RTF | ≈ 0.68 (experts-q4) |
+| RAM (experts-q4) | ~25 GB |
 
 The step time is GPU-kernel-launch-bound (~1500 small kernels per step on
 Metal), not bandwidth-bound (~7 GB of weights read per step would allow ~9 ms

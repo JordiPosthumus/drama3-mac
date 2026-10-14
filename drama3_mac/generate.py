@@ -19,6 +19,7 @@ from .config import ModelConfig
 from .tower import Tower
 
 PREFILL_CHUNK_SIZE = 128
+DEFAULT_MAX_NEW_TOKENS = 2048
 
 
 @dataclass
@@ -48,11 +49,23 @@ def generate(
     top_k: int = 30,
     top_p: float = 0.9,
     prefill_chunk_size: int = PREFILL_CHUNK_SIZE,
+    cache_capacity: int | None = None,
 ) -> GenerationOutput:
+    """Sample frames after the prompt rows.
+
+    ``cache_capacity`` pre-sizes the KV/recurrent caches (default: exactly
+    ``prompt_rows + max_new_tokens``).  Long-text callers pass one fixed
+    capacity for every chunk so the compiled decode graphs, which are keyed on
+    cache shapes, are compiled once and reused across chunks.
+    """
     if top_k < 1:
         raise ValueError(f"top_k must be at least 1; got {top_k}")
     prompt_rows = len(prompt)
     capacity = prompt_rows + max_new_tokens
+    if cache_capacity is not None:
+        if cache_capacity < capacity:
+            raise ValueError("cache_capacity is smaller than prompt + max_new_tokens")
+        capacity = cache_capacity
     if capacity > config.text.max_position_embeddings:
         raise ValueError("prompt + max_new_tokens exceeds max_position_embeddings")
     backbone.setup_caches(1, capacity)

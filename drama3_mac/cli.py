@@ -37,6 +37,8 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         temperature=args.temperature,
         top_k=args.top_k,
         top_p=args.top_p,
+        single_chunk=args.single_chunk,
+        chunk_gap=args.chunk_gap,
     )
     out = engine.save(result, args.output)
     gen = result.generation
@@ -71,7 +73,13 @@ def main(argv: list[str] | None = None) -> int:
     syn.add_argument("-o", "--output", default="output.wav", help="output wav path")
     syn.add_argument("--ref", default=None, help="reference wav for voice cloning")
     syn.add_argument("--ref-text", default=None, help="transcript of the reference wav")
-    syn.add_argument("--max-new-tokens", type=int, default=2048)
+    syn.add_argument("--max-new-tokens", type=int, default=0,
+                     help="frames per generation pass; 0 = auto (2048 single chunk, "
+                     "600 per chunk for long text)")
+    syn.add_argument("--single-chunk", action="store_true",
+                     help="generate the whole text in one pass instead of chunking")
+    syn.add_argument("--chunk-gap", type=float, default=0.05,
+                     help="silence in seconds between chunk audios")
     syn.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     syn.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     syn.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)

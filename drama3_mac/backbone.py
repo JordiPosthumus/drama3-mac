@@ -106,6 +106,18 @@ class FishOmniTextModel(Module):
         self.norm = norm
 
 
+def is_decode_step(length: int, continue_state: bool, use_cache: bool,
+                   position: mx.array | None) -> bool:
+    """Whether a backbone call is a single-token decode step.
+
+    Decode callers pass ``position``; prefill callers never do.  A 1-row
+    prefill chunk (``prompt_rows % prefill_chunk_size == 1``) must NOT take
+    the compiled decode path — it has no position, and at a chunk seam the
+    eager path's slice-based cache write and mask are the correct semantics.
+    """
+    return length == 1 and continue_state and use_cache and position is not None
+
+
 class Backbone(Module):
     def __init__(self, config: TextConfig, model: FishOmniTextModel, lm_head: Linear):
         self.config = config
@@ -140,7 +152,7 @@ class Backbone(Module):
     ) -> mx.array:
         length = inputs_embeds.shape[1]
         cos, sin = build_cos_sin(self._frequencies, start, length)
-        if length == 1 and continue_state and use_cache:
+        if is_decode_step(length, continue_state, use_cache, position):
             return self._decode_step(inputs_embeds, cos, sin, position)
         context = LayerContext(
             start=start,

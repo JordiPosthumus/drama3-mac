@@ -10,7 +10,9 @@ Endpoints:
       "reference_audio_b64": "<base64 wav/mp3/...>", # optional; enables cloning
       "reference_text": "transcript of the clip",    # required when cloning
       "temperature": 0.8, "top_k": 30, "top_p": 0.9,
-      "max_new_tokens": 2048,
+      "max_new_tokens": 0,                # 0 = auto (2048 single pass, 600/chunk)
+      "single_chunk": false,              # true = one pass, no chunking
+      "chunk_gap": 0.05,                  # silence between chunk audios (s)
       "response_format": "wav" | "pcm_f32"           # default wav
     }
 
@@ -160,10 +162,12 @@ class _Handler(BaseHTTPRequestHandler):
             text,
             reference_codes=reference_codes,
             reference_text=ref_text if ref_b64 is not None else None,
-            max_new_tokens=int(request.get("max_new_tokens", 2048)),
+            max_new_tokens=int(request.get("max_new_tokens", 0)),
             temperature=float(request.get("temperature", DEFAULT_TEMPERATURE)),
             top_k=int(request.get("top_k", DEFAULT_TOP_K)),
             top_p=float(request.get("top_p", DEFAULT_TOP_P)),
+            single_chunk=bool(request.get("single_chunk", False)),
+            chunk_gap=float(request.get("chunk_gap", 0.05)),
         )
         try:
             result = self.runner.call(job)

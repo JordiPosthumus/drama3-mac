@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+from .chunking import (
+    CHUNK_MAX_NEW_TOKENS,
+    Drama3History,
+    chunk_prompt,
+    split_drama3_text,
+    utf8_len,
+    validate_chunks,
+)
 from .codec import decode_frames, encode_audio, load_codec
 from .config import ModelConfig
-from .generate import GenerationOutput, generate
+from .generate import DEFAULT_MAX_NEW_TOKENS, GenerationOutput, generate
 from .model import Drama3Model, load_model
-from .prompt import build_prompt
+from .prompt import MAX_PROMPT_ROWS, build_prompt
 
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_K = 30
@@ -25,6 +34,7 @@ class TTSResult:
     sample_rate: int
     generation: GenerationOutput
     transcript: str
+    chunks: int = 1  # number of generated chunks (long-text path)
 
     @property
     def real_time_factor(self) -> float:
@@ -70,29 +80,169 @@ class Drama3Engine:
     def tts(
         self,
         text: str,
-        reference_audio: str | Path | np.ndarray | None = None,
-        reference_text: str | None = None,
-        reference_codes: np.ndarray | None = None,
-        max_new_tokens: int = 2048,
+        reference_audio: str | Path | np.ndarray
+        | list[str | Path | np.ndarray] | None = None,
+        reference_text: str | list[str] | None = None,
+        reference_codes: np.ndarray | list[np.ndarray] | None = None,
+        *,
+        max_new_tokens: int = 0,
         temperature: float = DEFAULT_TEMPERATURE,
         top_k: int = DEFAULT_TOP_K,
         top_p: float = DEFAULT_TOP_P,
+        single_chunk: bool = False,
+        chunk_gap: float = 0.05,
     ) -> TTSResult:
-        """Synthesize `text`; clone the voice of `reference_audio` when given."""
+        """Synthesize ``text``; clone the voice of ``reference_audio`` when given.
+
+        Multiple references are supported (a list of clips + transcripts); they
+        are all written into the prompt as ``[Reference N]`` blocks, which
+        measurably improves speaker adherence for hard-to-clone voices (a long
+        3-take reference measured 0.939 speaker-embedding cosine vs 0.928 for
+        the best single take).
+
+        Text longer than one chunk (~300 UTF-8 bytes) is automatically split at
+        sentence/paragraph boundaries and generated chunk by chunk, mirroring the
+        fish-speech reference: the first chunk and the latest one are fed back as
+        history so voice and pacing stay consistent, and each chunk may produce at
+        most ~600 frames (~28 s) which bounds the runaway-loop degeneration seen
+        on single-pass long generations.  ``single_chunk=True`` forces one pass
+        (needs ``max_new_tokens`` big enough for the whole text).  ``max_new_tokens
+        <= 0`` means auto: 2048 for a single pass, 600 per chunk otherwise.
+        ``chunk_gap`` is silence in seconds inserted between chunk audios.
+        """
+        refs: list[np.ndarray]
         if reference_codes is None and reference_audio is not None:
-            reference_codes = self.encode_reference(reference_audio)
-        if reference_codes is not None and not reference_text:
-            raise ValueError("cloning needs the reference transcript too")
-        prompt_texts = [reference_text] if reference_codes is not None else []
-        prompt_tokens = [reference_codes] if reference_codes is not None else []
-        prompt = build_prompt(
-            self.model.tokenizer,
-            self.config,
-            text,
-            prompt_texts=prompt_texts,
-            prompt_tokens=prompt_tokens,
+            audio_list = (
+                reference_audio if isinstance(reference_audio, list) else [reference_audio]
+            )
+            refs = [self.encode_reference(a) for a in audio_list]
+        elif reference_codes is not None:
+            refs = (
+                reference_codes if isinstance(reference_codes, list) else [reference_codes]
+            )
+        else:
+            refs = []
+        if isinstance(reference_text, str):
+            texts = [reference_text]
+        else:
+            texts = list(reference_text or [])
+        if refs and len(texts) != len(refs):
+            raise ValueError(
+                f"cloning needs one transcript per reference ({len(refs)} clips, "
+                f"{len(texts)} transcripts)"
+            )
+        prompt_texts = texts
+        prompt_tokens = refs
+
+        chunks = [text] if single_chunk else split_drama3_text(text) or [text]
+        validate_chunks(chunks)  # fail before generating anything
+        if max_new_tokens <= 0:
+            max_new_tokens = (
+                DEFAULT_MAX_NEW_TOKENS if len(chunks) == 1 else CHUNK_MAX_NEW_TOKENS
+            )
+
+        started = time.perf_counter()
+        if len(chunks) == 1:
+            prompt = build_prompt(
+                self.model.tokenizer,
+                self.config,
+                text,
+                prompt_texts=prompt_texts,
+                prompt_tokens=prompt_tokens,
+            )
+            out = self._generate_chunk(
+                prompt, max_new_tokens, temperature, top_k, top_p
+            )
+            if len(out.frames) == 0:
+                raise RuntimeError("the model emitted EOS before any audio frame")
+            audio = decode_frames(self.codec, out.codes, device=self.codec_device)
+            return TTSResult(
+                audio=audio,
+                sample_rate=self.codec.sample_rate,
+                generation=out,
+                transcript=text,
+            )
+
+        # Long-text path: one fixed cache capacity for every chunk so the
+        # compiled decode graphs are built once.  The bound must cover the
+        # reference block, every chunk's text rows, up to two history turns
+        # worth of audio rows (~600 frames each) and this chunk's generation.
+        ref_rows = len(
+            build_prompt(
+                self.model.tokenizer,
+                self.config,
+                chunks[0],
+                prompt_texts=prompt_texts,
+                prompt_tokens=prompt_tokens,
+            )
         )
-        out = generate(
+        text_rows = sum(utf8_len(chunk) for chunk in chunks)  # >= 1 row per token
+        capacity = min(
+            MAX_PROMPT_ROWS,
+            ref_rows + text_rows + 2 * CHUNK_MAX_NEW_TOKENS + max_new_tokens + 64,
+        )
+        history = Drama3History()
+        audios: list[np.ndarray] = []
+        frames_total = 0
+        elapsed = 0.0
+        all_eos = True
+        for index, chunk in enumerate(chunks):
+            prompt = chunk_prompt(
+                chunk,
+                self.model.tokenizer,
+                self.config,
+                prompt_texts,
+                prompt_tokens,
+                history,
+            )
+            budget = min(max_new_tokens, MAX_PROMPT_ROWS - len(prompt))
+            if budget < 1:
+                raise ValueError(
+                    f"chunk {index}: prompt has {len(prompt)} rows; no room to generate"
+                )
+            out = self._generate_chunk(
+                prompt, budget, temperature, top_k, top_p, cache_capacity=capacity
+            )
+            elapsed += out.elapsed
+            if len(out.frames) == 0:
+                print(f"[tts] chunk {index}: EOS before any audio frame; skipped")
+                continue
+            all_eos &= out.finish_reason == "eos"
+            frames_total += len(out.frames)
+            audios.append(decode_frames(self.codec, out.codes, device=self.codec_device))
+            history.push(chunk, out.codes)
+        if not audios:
+            raise RuntimeError("the model emitted EOS before any audio frame")
+        gap = np.zeros((int(chunk_gap * self.codec.sample_rate),), np.float32)
+        parts: list[np.ndarray] = []
+        for i, piece in enumerate(audios):
+            if i:
+                parts.append(gap)
+            parts.append(piece)
+        audio = np.concatenate(parts)
+        generation = GenerationOutput(
+            frames=np.zeros((frames_total, self.config.frame_width), np.int32),
+            finish_reason="eos" if all_eos else "length",
+            elapsed=elapsed,
+        )
+        return TTSResult(
+            audio=audio,
+            sample_rate=self.codec.sample_rate,
+            generation=generation,
+            transcript=text,
+            chunks=len(audios),
+        )
+
+    def _generate_chunk(
+        self,
+        prompt: np.ndarray,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        cache_capacity: int | None = None,
+    ) -> GenerationOutput:
+        return generate(
             self.model.backbone,
             self.model.tower,
             self.config,
@@ -101,15 +251,7 @@ class Drama3Engine:
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-        )
-        if len(out.frames) == 0:
-            raise RuntimeError("the model emitted EOS before any audio frame")
-        audio = decode_frames(self.codec, out.codes, device=self.codec_device)
-        return TTSResult(
-            audio=audio,
-            sample_rate=self.codec.sample_rate,
-            generation=out,
-            transcript=text,
+            cache_capacity=cache_capacity,
         )
 
     def save(self, result: TTSResult, path: str | Path) -> Path:

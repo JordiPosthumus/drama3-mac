@@ -1,9 +1,9 @@
 # drama3-mac — Fish Audio Drama 3, running on your Mac
 
-**The first and only Mac/MLX port of [Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3)**
-— a 35B-parameter MoE speech model (~3B active) running entirely on Apple
-Silicon: MLX on Metal for the backbone and audio tower, PyTorch/MPS for the
-DAC codec, no CUDA anywhere. Voice cloning from a reference clip (multi-take
+**Runs [Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) locally on Apple Silicon via MLX**
+— a 35B-parameter MoE speech model (~3B active) entirely on this Mac: MLX on
+Metal for the backbone and audio tower, PyTorch/MPS for the DAC codec, no CUDA
+anywhere. Voice cloning from a reference clip (multi-take
 supported), automatic long-text chunking, theatric tag support, a CLI, and a
 local HTTP server.
 
@@ -99,7 +99,7 @@ PYTHONPATH=. python -m drama3_mac.convert --checkpoint model --out checkpoints/d
 
 | variant | command | on disk | peak RAM (measured) | use it for |
 |---|---|---|---|---|
-| **experts-q4** (default) | `--bits 4` | 25.5 GB | **27.3 GB** | everyday use, fastest |
+| **experts-q4** (default) | `--bits 4` | 25.5 GB | **27.3 GB** | everyday use; fastest of the three |
 | experts-q8 | `--bits 8` | 41.6 GB | **42.4 GB** | marginally higher fidelity |
 | bf16 | `--bits 16` | 71.8 GB | **70.5 GB** | validation/reference |
 

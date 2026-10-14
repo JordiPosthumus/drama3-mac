@@ -258,8 +258,9 @@ WARN findings are reported and generation continues.
 
 ## 2026-10-14 (late night) — LANDING: the repo leads with what it is
 
-- **README reworked to lead with identity + measured results**: "the first
-  and only Mac/MLX port of Fish Audio Drama 3", a measured RTF table (q4 0.68
+- **README reworked to lead with identity + measured results**: a plain
+  factual description ("runs Fish Audio Drama 3 locally on Apple Silicon via
+  MLX", no undefendable superlatives per owner direction), a measured RTF table (q4 0.68
   / q8 0.72 / bf16 0.77 — q8 now actually benched: 30.0 fps, 33.4 ms/step),
   the measured voice-adherence table (speaker-embedding cosine vs reference:
   baseline 0.895 → hybrid per-chunk sampling 0.919 → cool-sampling

@@ -9,7 +9,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+import mlx.core as mx
+
 from .chunking import (
+    CHUNK_BYTES,
     CHUNK_MAX_NEW_TOKENS,
     Drama3History,
     chunk_prompt,
@@ -45,6 +48,7 @@ class TTSResult:
     chunks: int = 1  # number of generated chunks (long-text path)
     chunk_main: tuple[np.ndarray, ...] = ()  # main-token ids per chunk (analysis)
     warnings: tuple[str, ...] = ()  # postflight findings, "[WARN] check: ..."
+    finish_reasons: tuple[str, ...] = ()  # per-chunk "eos" | "length"
 
     @property
     def real_time_factor(self) -> float:
@@ -113,6 +117,9 @@ class Drama3Engine:
         chunk_gap: float = 0.05,
         repetition_penalty: float = 1.0,
         sampling_plan: list[tuple[float, float]] | None = None,
+        seed: int | None = None,
+        edge_fades: bool = True,
+        chunk_bytes: int | None = None,
     ) -> TTSResult:
         """Synthesize ``text``; clone the voice of ``reference_audio`` when given.
 
@@ -147,6 +154,15 @@ class Drama3Engine:
         checkpoint files, unbalanced delivery tags, prompt-capacity overflow,
         broken reference clips — see guardrails.py); postflight findings are
         returned on ``TTSResult.warnings``.
+
+        ``seed`` reseeds MLX's RNG before sampling: the same seed with the
+        same text/params/voice reproduces a bit-identical take.  ``None``
+        leaves the RNG state alone (non-deterministic across calls).
+
+        ``edge_fades=False`` skips the ~5 ms fades applied to chunk edges
+        (they kill codec seam transients); line-mode callers whose assembler
+        owns junction flow want raw segments.  ``chunk_bytes`` overrides the
+        ~300-byte auto-chunk target (the retry ladder resplits with it).
         """
         refs: list[np.ndarray] = []
         waveforms: list[tuple[np.ndarray, int]] = []  # for reference checks
@@ -181,7 +197,11 @@ class Drama3Engine:
         prompt_texts = texts
         prompt_tokens = refs
 
-        chunks = [text] if single_chunk else split_drama3_text(text) or [text]
+        chunks = [
+            text
+            if single_chunk
+            else split_drama3_text(text, max_bytes=chunk_bytes or CHUNK_BYTES) or [text]
+        ]
         validate_chunks(chunks)  # fail before generating anything
         if max_new_tokens <= 0:
             max_new_tokens = (
@@ -220,6 +240,8 @@ class Drama3Engine:
             plan = None
 
         started = time.perf_counter()
+        if seed is not None:
+            mx.random.seed(seed)
         if len(chunks) == 1:
             gen_temperature, gen_top_p = (
                 plan[0] if plan is not None else (temperature, top_p)
@@ -248,6 +270,7 @@ class Drama3Engine:
                 transcript=text,
                 chunk_main=(out.frames[:, 0],),
                 warnings=tuple(str(f) for f in findings),
+                finish_reasons=(out.finish_reason,),
             )
 
         # Long-text path: one fixed cache capacity for every chunk so the
@@ -312,11 +335,12 @@ class Drama3Engine:
         if not audios:
             raise RuntimeError("the model emitted EOS before any audio frame")
         findings += run_postflight(finish_reasons, frames_per_chunk, mains)
-        fade = min(128, self.codec.sample_rate // 200)  # ~5 ms edge fades kill
-        for piece in audios:                            # codec seam transients
-            ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
-            piece[:fade] *= ramp
-            piece[-fade:] *= ramp[::-1]
+        if edge_fades:
+            fade = min(128, self.codec.sample_rate // 200)  # ~5 ms edge fades kill
+            for piece in audios:                            # codec seam transients
+                ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+                piece[:fade] *= ramp
+                piece[-fade:] *= ramp[::-1]
         gap = np.zeros((int(chunk_gap * self.codec.sample_rate),), np.float32)
         parts: list[np.ndarray] = []
         for i, piece in enumerate(audios):
@@ -337,6 +361,7 @@ class Drama3Engine:
             chunks=len(audios),
             chunk_main=tuple(mains),
             warnings=tuple(str(f) for f in findings),
+            finish_reasons=tuple(finish_reasons),
         )
 
     def _generate_chunk(

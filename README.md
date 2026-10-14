@@ -6,15 +6,17 @@ Silicon — no CUDA anywhere. The backbone and audio-decoder tower run in MLX
 (Metal), the DAC codec in PyTorch (MPS). Voice cloning from a short reference
 clip, a CLI, and a local HTTP server included.
 
-> **⚠️ WORK IN PROGRESS — status: not yet producing intelligible speech.**
-> The pipeline runs end-to-end (model loads, generates speech-shaped audio with
-> clean EOS at the RTFs below), but as of 2026-10-14 the words are wrong:
-> synthesized clips transcribe as gibberish via Whisper (e.g. asked for
-> "the quick brown fox jumps over the lazy dog", heard "It's new as the old
-> bands are YAWA!"). Root cause under active investigation — the leading
-> suspect is the decode-loop frame/position ordering vs the reference
-> implementation. Acceptance bar: a clip must transcribe back to its prompt.
-> Follow the full story in [docs/JOURNEY.md](docs/JOURNEY.md).
+> **⚠️ WORK IN PROGRESS — intelligibility restored; acceptance suite running.**
+> 2026-10-14: the gibberish-audio bug was root-caused and fixed — the converter
+> was quantizing the attention/GDN projections on top of the experts, and that
+> noise compounds through the 40-layer residual stream until phoneme selection
+> breaks. The fix is **experts-only quantization** (mirroring the FP8 release,
+> which keeps everything but the experts in bf16). Verified: greedy decode of
+> "The quick brown fox jumps over the lazy dog." now transcribes back exactly
+> via Whisper medium.en on the experts-q8 checkpoint (experts-q4 also round-trips).
+> Still in progress: the full acceptance suite (natural-sampling temperature,
+> voice-cloning run, three prompts, RTF benchmarks) — results to follow.
+> Full story in [docs/JOURNEY.md](docs/JOURNEY.md).
 
 **Performance** on an M3 Ultra (512 GB unified memory): ~36 audio frames/s
 during decode, steady-state **RTF ≈ 0.59** — faster than real time. The
@@ -44,9 +46,11 @@ safetensors, numpy.
 # 1. download the original checkpoint (~40 GB)
 huggingface-cli download fishaudio/drama-3 --local-dir model
 
-# 2. convert to an MLX checkpoint (4-bit experts by default)
-python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-q4 --bits 4
-#    also available: --bits 8 (~40 GB), --bits 16 bf16 (~72 GB)
+# 2. convert to an MLX checkpoint (4-bit experts by default; projections stay bf16)
+python -m drama3_mac.convert --checkpoint model --out checkpoints/drama3-eq4 --bits 4
+#    experts-q8: --bits 8 (~42 GB)   bf16: --bits 16 (~72 GB)
+#    NOTE: do not pass --quantize-projections; quantizing the attention/GDN
+#    projections compounds noise until the model speaks gibberish (see docs/JOURNEY.md)
 
 # 3. put codec.pth where the engine can find it (default: model/codec.pth)
 ```

@@ -188,3 +188,40 @@ default changed; `--quantize-projections` exists for the adventurous.
   commands, measured memory table, performance section, tag-syntax docs),
   `AGENTS.md` added for coding agents, `examples/jabberwocky/` added as the
   six-part theatric showcase (whisper/terror/shout/glee directions).
+
+## 2026-10-14 (evening) — repetition_penalty investigated, implemented as opt-in, measured harmful
+
+The owner pointed at Fish's API docs (s2/drama-3 example: chunk_length 300,
+min_chunk_length 50, condition_on_previous_chunks true, temperature 0.7,
+top_p 0.7, repetition_penalty 1.2) and suggested implementing a Fish-compatible
+repetition penalty against the 1,2,1,2 loop pattern.
+
+- **The record correction**: Fish's own code ignores the field for Drama 3.
+  `inference_engine/__init__.py`: "repetition_penalty is ignored: S2-Pro and
+  Drama 3 use repetition-aware sampling instead"; `text2semantic/inference.py`
+  takes it "for API compatibility and ignored". There is no Fish-compatible
+  penalty to copy — RAS *is* their loop guard. (Their chunk defaults do confirm
+  the chunking design: 300-byte chunks with merge-up-to-length = min_chunk 50,
+  condition-on-previous = the pinned history in chunking.py.)
+- **Opt-in penalty implemented anyway** (clearly labeled off-reference):
+  CTRL-style over the last 64 main tokens — generated semantic codes only,
+  positive logits / penalty, negative × penalty, compiled with a fixed-shape
+  window buffer (`tower._compiled_penalty`, `generate(repetition_penalty=...)`,
+  `engine.tts`, CLI `--repetition-penalty`, server field; default 1.0 = off =
+  faithful). Unit-tested (tests/test_sampling_penalty.py, 4 cases).
+- **Measured A/B on the auto-chunked Jabberwocky script** (scripts/ab_sampling.py,
+  same 5-chunk split, same reference clip; repeat-rate = fraction of generated
+  main tokens repeating within the previous 16, the RAS window):
+  - fish defaults (temp 0.7 / top_p 0.7): 86.7 s audio, repeat-rate 14.2%,
+    Whisper round-trip complete (all stanzas, ending "Twas Brillig" coda).
+  - ours (temp 0.8 / top_p 0.9): 73.7 s, repeat-rate 5.2%, round-trip complete
+    (one line "Beware the Jabberwock, my son" skipped — sampling variance).
+  - ours + penalty 1.2: 104.9 s, repeat-rate **70.3%**, round-trip collapses to
+    341 chars: stanzas skipped, opening stanza repeated at the end.
+- **Verdict**: the penalty backfires — speech semantic codes repeat legitimately
+  (phonology is periodic); pushing them down forces tail draws and corrupts the
+  code distribution. Default stays 1.0; the knob is kept for experiments.
+  Server warmup also added (absorbs MLX compile before the first request), and
+  a double-loop race in the server job queue (a second `runner.loop()` thread
+  competing with the main thread for jobs → intermittent "no Stream" errors)
+  was found and removed.

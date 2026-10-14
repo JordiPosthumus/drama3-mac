@@ -39,6 +39,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         top_p=args.top_p,
         single_chunk=args.single_chunk,
         chunk_gap=args.chunk_gap,
+        repetition_penalty=args.repetition_penalty,
     )
     out = engine.save(result, args.output)
     gen = result.generation
@@ -83,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     syn.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     syn.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     syn.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
+    syn.add_argument("--repetition-penalty", type=float, default=1.0,
+                     help="opt-in CTRL-style penalty on recently drawn semantic "
+                          "codes (1.0 = off = Fish-faithful; Fish ignores its own "
+                          "repetition_penalty field for Drama 3)")
     _add_common(syn)
     syn.set_defaults(func=cmd_synthesize)
 

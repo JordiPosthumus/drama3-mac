@@ -35,6 +35,7 @@ class TTSResult:
     generation: GenerationOutput
     transcript: str
     chunks: int = 1  # number of generated chunks (long-text path)
+    chunk_main: tuple[np.ndarray, ...] = ()  # main-token ids per chunk (analysis)
 
     @property
     def real_time_factor(self) -> float:
@@ -91,6 +92,7 @@ class Drama3Engine:
         top_p: float = DEFAULT_TOP_P,
         single_chunk: bool = False,
         chunk_gap: float = 0.05,
+        repetition_penalty: float = 1.0,
     ) -> TTSResult:
         """Synthesize ``text``; clone the voice of ``reference_audio`` when given.
 
@@ -109,6 +111,12 @@ class Drama3Engine:
         (needs ``max_new_tokens`` big enough for the whole text).  ``max_new_tokens
         <= 0`` means auto: 2048 for a single pass, 600 per chunk otherwise.
         ``chunk_gap`` is silence in seconds inserted between chunk audios.
+
+        ``repetition_penalty`` is an opt-in, off-reference experiment: the
+        fish-speech engine carries the field (SDK default 1.2) but ignores it
+        for Drama 3, relying on repetition-aware sampling instead.  The port
+        implements it as a CTRL-style penalty over the last 64 main tokens
+        (semantic codes) for fighting hot-sampling loops; 1.0 = off = faithful.
         """
         refs: list[np.ndarray]
         if reference_codes is None and reference_audio is not None:
@@ -151,7 +159,8 @@ class Drama3Engine:
                 prompt_tokens=prompt_tokens,
             )
             out = self._generate_chunk(
-                prompt, max_new_tokens, temperature, top_k, top_p
+                prompt, max_new_tokens, temperature, top_k, top_p,
+                repetition_penalty=repetition_penalty,
             )
             if len(out.frames) == 0:
                 raise RuntimeError("the model emitted EOS before any audio frame")
@@ -161,6 +170,7 @@ class Drama3Engine:
                 sample_rate=self.codec.sample_rate,
                 generation=out,
                 transcript=text,
+                chunk_main=(out.frames[:, 0],),
             )
 
         # Long-text path: one fixed cache capacity for every chunk so the
@@ -183,6 +193,7 @@ class Drama3Engine:
         )
         history = Drama3History()
         audios: list[np.ndarray] = []
+        mains: list[np.ndarray] = []
         frames_total = 0
         elapsed = 0.0
         all_eos = True
@@ -201,7 +212,9 @@ class Drama3Engine:
                     f"chunk {index}: prompt has {len(prompt)} rows; no room to generate"
                 )
             out = self._generate_chunk(
-                prompt, budget, temperature, top_k, top_p, cache_capacity=capacity
+                prompt, budget, temperature, top_k, top_p,
+                cache_capacity=capacity,
+                repetition_penalty=repetition_penalty,
             )
             elapsed += out.elapsed
             if len(out.frames) == 0:
@@ -210,9 +223,15 @@ class Drama3Engine:
             all_eos &= out.finish_reason == "eos"
             frames_total += len(out.frames)
             audios.append(decode_frames(self.codec, out.codes, device=self.codec_device))
+            mains.append(out.frames[:, 0])
             history.push(chunk, out.codes)
         if not audios:
             raise RuntimeError("the model emitted EOS before any audio frame")
+        fade = min(128, self.codec.sample_rate // 200)  # ~5 ms edge fades kill
+        for piece in audios:                            # codec seam transients
+            ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+            piece[:fade] *= ramp
+            piece[-fade:] *= ramp[::-1]
         gap = np.zeros((int(chunk_gap * self.codec.sample_rate),), np.float32)
         parts: list[np.ndarray] = []
         for i, piece in enumerate(audios):
@@ -231,6 +250,7 @@ class Drama3Engine:
             generation=generation,
             transcript=text,
             chunks=len(audios),
+            chunk_main=tuple(mains),
         )
 
     def _generate_chunk(
@@ -241,6 +261,7 @@ class Drama3Engine:
         top_k: int,
         top_p: float,
         cache_capacity: int | None = None,
+        repetition_penalty: float = 1.0,
     ) -> GenerationOutput:
         return generate(
             self.model.backbone,
@@ -251,6 +272,7 @@ class Drama3Engine:
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            repetition_penalty=repetition_penalty,
             cache_capacity=cache_capacity,
         )
 

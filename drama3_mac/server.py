@@ -13,6 +13,7 @@ Endpoints:
       "max_new_tokens": 0,                # 0 = auto (2048 single pass, 600/chunk)
       "single_chunk": false,              # true = one pass, no chunking
       "chunk_gap": 0.05,                  # silence between chunk audios (s)
+      "repetition_penalty": 1.0,          # opt-in loop guard; 1.0 = off = Fish-faithful
       "response_format": "wav" | "pcm_f32"           # default wav
     }
 
@@ -31,6 +32,7 @@ import io
 import json
 import queue
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -126,22 +128,40 @@ class _Handler(BaseHTTPRequestHandler):
 
         ref_b64 = request.get("reference_audio_b64")
         ref_text = request.get("reference_text")
+        # multi-reference form: references: [{audio_b64, text}, ...]
+        batch = request.get("references")
+        if batch is not None:
+            if not isinstance(batch, list) or not batch:
+                self._send_json(400, {"error": "references must be a non-empty list"})
+                return
+            ref_b64 = [item.get("audio_b64") for item in batch]
+            ref_text = [item.get("text") for item in batch]
+            if any(not t for t in ref_text):
+                self._send_json(400, {"error": "every reference needs 'text'"})
+                return
         if ref_b64 is not None and not ref_text:
             self._send_json(400, {"error": "cloning needs 'reference_text'"})
             return
         reference_codes = None
         if ref_b64 is not None:
+            b64_list = ref_b64 if isinstance(ref_b64, list) else [ref_b64]
             try:
-                audio_bytes = base64.b64decode(ref_b64, validate=True)
+                audio_list = [
+                    base64.b64decode(b, validate=True) for b in b64_list
+                ]
             except (ValueError, TypeError) as exc:
-                self._send_json(400, {"error": f"bad reference_audio_b64: {exc}"})
+                self._send_json(400, {"error": f"bad reference audio: {exc}"})
                 return
-            key = hashlib.sha256(audio_bytes).hexdigest()
+            keys = [hashlib.sha256(a).hexdigest() for a in audio_list]
             with self.refs_lock:
-                cached = self.refs.get(key)
-            if cached is None:
+                cached_list = [self.refs.get(k) for k in keys]
+            for i, (key, cached) in enumerate(zip(keys, cached_list)):
+                if cached is not None:
+                    continue
                 try:
-                    wav, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
+                    wav, sr = sf.read(
+                        io.BytesIO(audio_list[i]), dtype="float32", always_2d=True
+                    )
                 except Exception as exc:
                     self._send_json(400, {"error": f"cannot decode reference audio: {exc}"})
                     return
@@ -150,7 +170,8 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 with self.refs_lock:
                     self.refs[key] = cached
-            reference_codes = cached
+                cached_list[i] = cached
+            reference_codes = cached_list
 
         fmt = request.get("response_format", "wav")
         if fmt not in ("wav", "pcm_f32"):
@@ -168,9 +189,19 @@ class _Handler(BaseHTTPRequestHandler):
             top_p=float(request.get("top_p", DEFAULT_TOP_P)),
             single_chunk=bool(request.get("single_chunk", False)),
             chunk_gap=float(request.get("chunk_gap", 0.05)),
+            repetition_penalty=float(request.get("repetition_penalty", 1.0)),
         )
         try:
-            result = self.runner.call(job)
+            try:
+                result = self.runner.call(job)
+            except RuntimeError as exc:
+                # MLX's lazy compile has a rare first-call race ("There is no
+                # Stream(...) in current thread"); retrying on the same thread
+                # succeeds because the graphs are compiled by then.
+                if "Stream" not in str(exc):
+                    raise
+                print(f"[server] transient stream error, retrying once: {exc}", flush=True)
+                result = self.runner.call(job)
             if fmt == "pcm_f32":
                 body = result.audio.astype(np.float32).tobytes()
                 content_type = "audio/f32;rate=%d" % result.sample_rate
@@ -178,7 +209,8 @@ class _Handler(BaseHTTPRequestHandler):
                 body = _encode_wav(result.audio, result.sample_rate)
                 content_type = "audio/wav"
         except (RuntimeError, ValueError) as exc:
-            self._send_json(500, {"error": str(exc)})
+            traceback.print_exc()
+            self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
             return
 
         self.send_response(200)
@@ -204,8 +236,13 @@ def serve(
         model_dir, codec_path=codec_path, codec_device=codec_device, codec_dtype=codec_dtype
     )
     runner = MainThreadRunner()
-    worker = threading.Thread(target=runner.loop, daemon=True)
-    worker.start()
+
+    # Warm up MLX's compiled decode graphs before serving: the first call pays
+    # ~10-60 s of compile. Runs inline on this thread, which IS the thread that
+    # loaded the model — exactly where runner.loop() will execute all jobs.
+    print("[server] warming up decode graphs ...", flush=True)
+    engine.tts("Warmup.", single_chunk=True, max_new_tokens=12)
+    print("[server] warmup done", flush=True)
 
     handler = type(
         "BoundHandler",

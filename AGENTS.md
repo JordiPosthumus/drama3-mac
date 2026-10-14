@@ -52,8 +52,12 @@ curl -s localhost:8843/v1/tts -H 'Content-Type: application/json' \
   (false), `chunk_gap` (0.05), `response_format` (`wav`|`pcm_f32`).
 - Response headers worth asserting: `X-Real-Time-Factor`, `X-Frames`,
   `X-Generation-Seconds`.
-- `repetition_penalty` is deliberately ignored (Drama 3 uses
-  repetition-aware sampling); the server warns if you send one.
+- `repetition_penalty`: accepted, default 1.0 = off. Fish's own engine ignores
+  this field for Drama 3 (`repetition_penalty is ignored: S2-Pro and Drama 3
+  use repetition-aware sampling instead`); the port implements an opt-in
+  CTRL-style penalty over the last 64 main tokens, but the measured A/B
+  (scripts/ab_sampling.py) found 1.2 degrades output — leave it off unless
+  experimenting.
 
 ## Python API
 

@@ -183,6 +183,24 @@ class TowerLayer(Module):
         return out.astype(mixed.dtype)
 
 
+def _compiled_penalty(vocab: int):
+    """Compiled CTRL-style repetition penalty over ``vocab`` candidates.
+
+    Token ids seen in the recent-window buffer get positive logits divided by
+    the penalty and negative logits multiplied by it; all others pass through.
+    ``window`` is a fixed-shape (W,) int32 buffer (unused slots = -1) and
+    ``penalty`` a scalar array, so one compiled trace serves every call.
+    """
+
+    def apply(logits: mx.array, window: mx.array, penalty: mx.array) -> mx.array:
+        ids = mx.arange(logits.shape[-1])
+        hits = (window[:, None] == ids[None, :]).any(axis=0)
+        pushed = mx.where(logits > 0, logits / penalty, logits * penalty)
+        return mx.where(hits, pushed, logits)
+
+    return mx.compile(apply)
+
+
 class Tower(Module):
     def __init__(self, config: ModelConfig, cfg: AudioDecoderConfig,
                  codebook_embeddings: mx.array, shared_layers, residual_layers,
@@ -250,7 +268,9 @@ class Tower(Module):
             hidden = layer(hidden, next_frames[:, index + 1], semantic, positions)
 
     def decode_step(self, logits, hidden, positions, frames, history, *,
-                    temperature: float, top_k: int, top_p: float) -> mx.array:
+                    temperature: float, top_k: int, top_p: float,
+                    repetition_penalty: float = 1.0,
+                    penalty_window: mx.array | None = None) -> mx.array:
         """Sample the frame after each row; the main token is drawn over eos + semantics."""
         if self._candidates is None:
             eos = mx.array([self.eos_id])
@@ -258,6 +278,15 @@ class Tower(Module):
             self._candidates = mx.concatenate([eos, band])
         candidates = self._candidates
         candidate_logits = logits[:, candidates]
+        if repetition_penalty != 1.0:
+            if penalty_window is None:
+                raise ValueError("repetition_penalty needs penalty_window")
+            penalty = _compiled_penalty(candidate_logits.shape[-1])
+            candidate_logits = penalty(
+                candidate_logits,
+                penalty_window,
+                mx.array(repetition_penalty, mx.float32),
+            )
         temperature_a = mx.array(temperature, mx.float32)
         top_k_a = mx.array(top_k, mx.int32)
         top_p_a = mx.array(top_p, mx.float32)

@@ -19,6 +19,7 @@ from .config import ModelConfig
 from .tower import Tower
 
 PREFILL_CHUNK_SIZE = 128
+REPETITION_WINDOW = 64  # main tokens considered by the opt-in repetition penalty
 DEFAULT_MAX_NEW_TOKENS = 2048
 
 
@@ -48,6 +49,7 @@ def generate(
     temperature: float = 0.8,
     top_k: int = 30,
     top_p: float = 0.9,
+    repetition_penalty: float = 1.0,
     prefill_chunk_size: int = PREFILL_CHUNK_SIZE,
     cache_capacity: int | None = None,
 ) -> GenerationOutput:
@@ -102,6 +104,14 @@ def generate(
     produced = 0
     finish_reason = "length"
     decode_started = time.perf_counter()
+    # Fish carries a repetition_penalty field but ignores it for Drama 3 (RAS
+    # replaces it), so 1.0 = faithful default.  The opt-in penalty is a
+    # CTRL-style push against recently drawn semantic codes (see tower.py).
+    penalty_window = (
+        np.full((REPETITION_WINDOW,), -1, np.int32)
+        if repetition_penalty != 1.0
+        else None
+    )
     for step in range(max_new_tokens):
         position = prompt_rows - 1 + step
         logits = backbone.compute_logits(hidden)
@@ -114,6 +124,10 @@ def generate(
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            penalty_window=(
+                mx.array(penalty_window, mx.int32) if penalty_window is not None else None
+            ),
         )
         embeddings = tower.embed_backbone(sampled, backbone.embed(sampled[:, 0])[None])
         hidden = backbone(
@@ -131,6 +145,9 @@ def generate(
             break
         frames[position + 1] = sampled[0]
         produced += 1
+        if penalty_window is not None:
+            penalty_window[:-1] = penalty_window[1:]
+            penalty_window[-1] = main
 
     elapsed = time.perf_counter() - decode_started
     out = np.array(frames[prompt_rows : prompt_rows + produced], copy=True)

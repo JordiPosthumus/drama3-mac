@@ -32,6 +32,7 @@ import numpy as np
 
 from .engine import Drama3Engine
 from .guardrails import PreflightError
+from .enhance import EnhanceError, enhance_lines
 from .service import RenderError, TtsService
 from .voices import VoiceError, VoiceRegistry
 
@@ -166,8 +167,57 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_voice_create()
         elif path == "/v1/batch":
             self._handle_batch()
+        elif path == "/v1/dialogue":
+            self._handle_dialogue()
+        elif path == "/v1/enhance":
+            self._handle_enhance()
         else:
             self._send_json(404, {"error": f"unknown path {self.path}"})
+
+    def _handle_enhance(self) -> None:
+        """LLM script augmenter: proposes delivery tags; never touches MLX."""
+        request = self._read_json()
+        if request is None:
+            return
+        try:
+            results = enhance_lines(
+                request.get("lines") or [],
+                tone_hints=request.get("tone_hints"),
+            )
+        except EnhanceError as exc:
+            self._send_json(503, {
+                "error": f"enhance LLM unavailable: {exc}",
+                "lines": request.get("lines", []),  # caller keeps originals
+            })
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except Exception as exc:  # never drop the connection without a reply
+            traceback.print_exc()
+            self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._send_json(200, {
+            "ok": True,
+            "count": len(results),
+            "results": results,
+            "warnings": [w for r in results for w in r.get("warnings", [])],
+        })
+
+    def _handle_dialogue(self) -> None:
+        request = self._read_json()
+        if request is None:
+            return
+        try:
+            payload = self._run_with_stream_retry(self.service.dialogue, request)
+        except PreflightError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except (RenderError, VoiceError, RuntimeError, ValueError) as exc:
+            traceback.print_exc()
+            self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._send_json(200, payload)
 
     def _handle_voice_create(self) -> None:
         request = self._read_json()
@@ -317,7 +367,7 @@ def serve(
     server_thread.start()
     print(
         f"[server] ready on http://{host}:{port}  "
-        f"(POST /v1/tts | /v1/batch | /v1/voices, GET /health | /v1/voices | /v1/cache, "
+        f"(POST /v1/tts | /v1/batch | /v1/dialogue | /v1/voices, GET /health | /v1/voices | /v1/cache, "
         f"DELETE /v1/voices/{{name}}; codec {engine.codec_device} @ {engine.codec.sample_rate} Hz, "
         f"voices in {voices_dir})",
         flush=True,

@@ -91,3 +91,24 @@ def f0_median_hz(
     if not estimates:
         return None
     return float(np.median(estimates))
+
+
+def voiced_ratio(audio, sample_rate) -> float | None:
+    """Fraction of analysis frames above the voiced-energy floor.
+
+    Whole-clip rms/f0 can look healthy on a take with a long silent gap
+    (e.g. an exploded breath cue); the voiced ratio exposes it.
+    """
+    if len(audio) < sample_rate // 10:  # <100 ms: nothing to measure
+        return None
+    x, sr = _decimate(np.asarray(audio, np.float32), sample_rate)
+    frame = int(sr * 0.04)
+    hop = frame // 2
+    n_frames = 1 + (len(x) - frame) // hop
+    if n_frames < 1:
+        return None
+    energies = np.array(
+        [float(np.mean(x[i * hop : i * hop + frame] ** 2)) for i in range(n_frames)]
+    )
+    floor = 0.15 * np.percentile(energies, 90)
+    return float(np.count_nonzero(energies > max(floor, 1e-8)) / n_frames)

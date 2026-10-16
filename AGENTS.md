@@ -105,23 +105,63 @@ per-line podcast renderer). Start it with `drama3 serve --port 8843`.
   `voice=name`; the voice recipe fills sampling defaults, explicit request
   params win. `GET /v1/voices`, `GET /v1/voices/{name}`,
   `DELETE /v1/voices/{name}`.
-- **JSON envelope**: `response_format=json` returns `{audio_b64,
-  duration_s, rms, f0_hz_median, finish_reason, rtf, seed, request_echo,
-  attempts, warnings, cache, ok}` — metrics are measured on the returned
-  audio (cheap numpy autocorrelation f0), so callers can gate lines before
-  saving. Raw `wav` stays the default.
+- **JSON envelope**: `response_format=json` returns `{audio_b64, text,
+  duration_s, rms, f0_hz_median, voiced_ratio, finish_reason, degraded,
+  rtf, seed, temperature, request_echo, attempts, warnings, cache, ok}` —
+  metrics are measured on the returned audio (cheap numpy autocorrelation
+  f0; `voiced_ratio` exposes long silent gaps that rms hides), so callers
+  can gate lines before saving. `seed`/`temperature` report the winning
+  attempt (replay-pin those). Raw `wav` stays the default.
 - **Seeds + cache**: `seed` makes renders deterministic (same seed + params
   = bit-identical take, verified); results cache under
   hash(voice, text, params, seed); `GET /v1/cache` gives hit/miss stats.
-- **Retry ladder**: on `finish=length` for short-ish text the server resplits
-  (300→150→75 B) and retries up to 2×, returning EOS-clean audio only —
-  exhaustion is HTTP 422 with the attempt list. `retry=false` opts out.
+- **Retry ladder (loop-aware)**: for short-ish text the server retries until a
+  **clean** take — EOS *and* no loop-detector/immediate-EOS warnings — keeping
+  the first clean one; per-attempt entries carry `loop: bool` and the final
+  attempt escalates temperature to 1.0 when ≤0.9 (breaks direction-content
+  loop basins; skipped when `sampling_plan` is explicit). `max_retries`
+  (default 2, max 5) sizes the ladder; resplit order 300→150→75 B.
+  Exhaustion is HTTP 422 with the attempt list. `accept_degraded=true`
+  ships the best non-looping take (marked `degraded: true` + warning)
+  instead of 422; looped takes never ship. `retry=false` opts out entirely.
 - **Line mode**: `line=true` renders one clean segment — no internal
   chunking, no baked gaps or edge fades (the consumer's assembler owns
   junction flow).
 - **Batch**: `POST /v1/batch {lines: [{text, voice, line_id, ...}]}` renders
   sequentially through one warm model, `mx.clear_cache()` per line,
-  per-line envelope array with error capture.
+  per-line envelope array with error capture. Lines accept `speaker`
+  (0–15) and any render knob (`seed`, `temperature`, `retry`,
+  `max_retries`, `accept_degraded`, …).
+- **Dialogue (reactive)**: `POST /v1/dialogue {lines: [{text, voice,
+  speaker?, line_id?, gap_before_s?}], history_turns?, gap_s?}` renders
+  turn by turn; each line hears the previous line's text + audio as
+  completed history turns (upstream `previous_takes` semantics), so replies
+  react to the voice they answer. `speaker` (0–15) tags the line text; pair
+  with reference transcripts tagged to the same ids or voices bleed into
+  each other. Per-line `gap_before_s` overrides `gap_s` before that line.
+  `history_turns: 0` reproduces deaf per-line rendering (A/B hook). Returns
+  per-line envelopes (each with `start_s`) plus the assembled conversation
+  wav (default `gap_s` 0.25 s) and aggregate top-level `warnings`. Engine-
+  level: `engine.tts(..., history=[(text, codes), ...])` forces the single-
+  chunk path and counts history frames in the capacity preflight.
+  `/v1/tts` also accepts `speaker: N` directly (symmetric with dialogue).
+- **Augmenter**: `POST /v1/enhance {lines: [{line_id?, text}], tone_hints?}`
+  proposes delivery tags for bare author lines via an LLM (Star Gate
+  PoolModel @ 127.0.0.1:30000 by default — `DRAMA3_ENHANCE_BASE_URL/MODEL/
+  API_KEY/TIMEOUT` override; never touches MLX). Output feeds
+  `/v1/dialogue` verbatim: per-line `{line_id, text, rationale, warnings}`.
+  **OWNER RULE: never cap the LLM's output** — no `max_tokens`, no output
+  restrictions of any kind; the models think as long as they need
+  (`DRAMA3_ENHANCE_TIMEOUT=0` disables the liveness timeout too). An early
+  2048 cap burned the whole budget on reasoning and returned null content —
+  do not reintroduce caps. Validators strip `<|...|>`, drop unknown paired
+  tags, remove line-start sound events, enforce ≤2 paired tags + ≤80-char
+  directions, downcase ALL-CAPS, and fall back to the original line if word
+  content changed. LLM down ⇒ HTTP 503 with the original lines echoed.
+- **Point tags**: inline delivery cues (`[sighs]`, `[laughs]`,
+  `<whisper>...</whisper>`, `[bracketed]` cues) are first-class text — the
+  chunker never splits them. Documented upstream on the HF model card; test
+  dialogue expressiveness with them before building fancier mechanisms.
 
 ## Known limits
 

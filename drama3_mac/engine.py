@@ -32,7 +32,7 @@ from .guardrails import (
     check_tag_balance,
     run_postflight,
 )
-from .prompt import MAX_PROMPT_ROWS, build_prompt
+from .prompt import MAX_PROMPT_ROWS, build_prompt, validate_text
 
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_K = 30
@@ -108,6 +108,7 @@ class Drama3Engine:
         | list[str | Path | np.ndarray] | None = None,
         reference_text: str | list[str] | None = None,
         reference_codes: np.ndarray | list[np.ndarray] | None = None,
+        history: list[tuple[str, np.ndarray]] = (),
         *,
         max_new_tokens: int = 0,
         temperature: float = DEFAULT_TEMPERATURE,
@@ -128,6 +129,15 @@ class Drama3Engine:
         measurably improves speaker adherence for hard-to-clone voices (a long
         3-take reference measured 0.939 speaker-embedding cosine vs 0.928 for
         the best single take).
+
+        ``history`` optionally carries completed conversation turns as
+        ``(text, codes)`` pairs — codes ``[num_codebooks, frames]``, the same
+        codec encoding references use (a rendered turn's own codes work
+        directly).  Each turn is written into the prompt as a completed user
+        + assistant audio turn, so the generated line can react to the voice
+        it "hears" — the mechanism behind natural two-person dialogue
+        (upstream exposes this as ``previous_takes``).  History forces the
+        single-chunk path: text plus history audio must fit one prompt.
 
         Text longer than one chunk (~300 UTF-8 bytes) is automatically split at
         sentence/paragraph boundaries and generated chunk by chunk, mirroring the
@@ -202,10 +212,27 @@ class Drama3Engine:
         # chunk list as one element and crashed validate_text on lists.
         chunks = (
             [text]
-            if single_chunk
+            if (single_chunk or history)
             else (split_drama3_text(text, max_bytes=chunk_bytes or CHUNK_BYTES) or [text])
         )
         validate_chunks(chunks)  # fail before generating anything
+        for index, (turn_text, turn_codes) in enumerate(history, 1):
+            validate_text(turn_text, f"history turn {index}")
+            turn_codes = np.asarray(turn_codes)
+            if (
+                turn_codes.ndim != 2
+                or turn_codes.shape[0] != self.config.audio_decoder.num_codebooks
+            ):
+                raise PreflightError(
+                    f"[FAIL] history turn {index}: codes must be "
+                    f"[{self.config.audio_decoder.num_codebooks}, frames]; "
+                    f"got {turn_codes.shape}"
+                )
+            if turn_codes.min() < 0 or turn_codes.max() >= self.config.audio_decoder.vocab_size:
+                raise PreflightError(
+                    f"[FAIL] history turn {index}: codes out of vocabulary range"
+                )
+        history_frames = sum(int(np.asarray(c).shape[-1]) for _, c in history)
         if max_new_tokens <= 0:
             max_new_tokens = (
                 DEFAULT_MAX_NEW_TOKENS if len(chunks) == 1 else CHUNK_MAX_NEW_TOKENS
@@ -224,6 +251,7 @@ class Drama3Engine:
             findings += check_capacity(
                 text, ref_frames, utf8_len=utf8_len,
                 max_new_tokens=max_new_tokens,
+                history_rows=history_frames,
             )
         else:
             largest = max(chunks, key=utf8_len)
@@ -255,6 +283,7 @@ class Drama3Engine:
                 text,
                 prompt_texts=prompt_texts,
                 prompt_tokens=prompt_tokens,
+                history=history,
             )
             out = self._generate_chunk(
                 prompt, max_new_tokens, gen_temperature, top_k, gen_top_p,

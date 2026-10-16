@@ -245,3 +245,78 @@ def test_wav_mode_still_default(server):
         assert r.headers.get("X-Real-Time-Factor")
     wav, sr = sf.read(io.BytesIO(wav_bytes))
     assert sr == 44100 and len(wav) > sr  # >1 s of audio
+
+
+def test_dialogue_reactive_threading(server):
+    """v1 reactive dialogue (2026-10-14): /v1/dialogue renders line mode with
+    each line's predecessor (text + audio) threaded into the prompt, and
+    returns the assembled conversation wav."""
+    port = server
+    for name in ("dlg-a", "dlg-b"):
+        status, env = _post(port, "/v1/voices", {
+            "name": name, "audio_b64": _ref_b64(), "text": REF_TEXT,
+        })
+        assert status in (201, 400), env  # 400 = already registered (rerun)
+    status, env = _post(port, "/v1/dialogue", {"lines": [
+        {"text": "Welcome to the show.", "voice": "dlg-a", "seed": 21},
+        {"text": "Thanks for having me!", "voice": "dlg-b", "seed": 22},
+    ], "gap_s": 0.2, "history_turns": 1})
+    assert status == 200, env.get("error")
+    assert env["ok"] is True and env["count"] == 2
+    assert env["results"][0]["finish_reason"] == "eos"
+    assert env["results"][1]["finish_reason"] == "eos"
+    wav, sr = sf.read(io.BytesIO(base64.b64decode(env["audio_b64"])))
+    assert len(wav) / sr > 2.0
+
+
+def test_dialogue_history_zero_matches_batch(server):
+    """history_turns=0 must reproduce the deaf per-line behaviour (A/B hook)."""
+    port = server
+    status, env = _post(port, "/v1/dialogue", {"lines": [
+        {"text": "Quick check.", "voice": "dlg-a", "seed": 31},
+        {"text": "Another quick check.", "voice": "dlg-a", "seed": 32},
+    ], "history_turns": 0})
+    assert status == 200, env.get("error")
+    assert env["ok"] is True
+    assert all(r["finish_reason"] == "eos" for r in env["results"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: /v1/enhance (LLM augmenter — no MLX involved)
+# ---------------------------------------------------------------------------
+
+
+def test_enhance_503_with_originals_when_llm_down(server, monkeypatch):
+    import drama3_mac.enhance as enh
+
+    monkeypatch.setattr(enh, "ENHANCE_BASE_URL", "http://127.0.0.1:1/v1")  # dead port
+    lines = [{"line_id": 0, "text": "Unchanged."}]
+    status, body = _post(server, "/v1/enhance", {"lines": lines})
+    assert status == 503
+    assert body["lines"] == lines  # caller keeps the originals
+
+
+def test_enhance_200_validated_output(server, monkeypatch):
+    import drama3_mac.enhance as enh
+
+    def fake_chat(messages, base_url, model, api_key, timeout):
+        return ('[{"line_id": 0, "text": "[warm] Well... hello there.",'
+                ' "rationale": "warm"},'
+                ' {"line_id": 1, "text": "[sighs] CHANGED.", "rationale": "bad"}]')
+
+    monkeypatch.setattr(enh, "_chat", fake_chat)
+    status, body = _post(server, "/v1/enhance", {"lines": [
+        {"line_id": 0, "text": "Well, hello there."},
+        {"line_id": 1, "text": "Original."},
+    ]})
+    assert status == 200
+    assert body["ok"] is True
+    assert body["results"][0]["text"] == "[warm] Well... hello there."
+    assert body["results"][1]["text"] == "Original."  # fell back
+    assert any("line-start" in w or "word content" in w
+               for w in body["results"][1]["warnings"])
+
+
+def test_enhance_400_on_bad_input(server):
+    status, body = _post(server, "/v1/enhance", {"lines": []})
+    assert status == 400
